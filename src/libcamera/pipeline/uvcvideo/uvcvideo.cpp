@@ -49,8 +49,10 @@ public:
 	const std::string &id() const { return id_; }
 
 	std::unique_ptr<V4L2VideoDevice> video_;
+	std::unique_ptr<V4L2VideoDevice> metadata_;
 	Stream stream_;
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
+	int findMetaData(const std::vector<MediaEntity *> &entities);
 
 private:
 	bool generateId();
@@ -394,7 +396,7 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 		return false;
 
 	std::unique_ptr<UVCCameraData> data = std::make_unique<UVCCameraData>(this);
-
+	
 	if (data->init(media))
 		return false;
 
@@ -411,6 +413,23 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 	return true;
 }
 
+//check every entity and see if the video version of it a) succeeds and b) has the metadata caps
+int UVCCameraData::findMetaData(const std::vector<MediaEntity *> &entities){
+	int ret =0;
+	LOG(UVC, Info) << "Searching for metadata device";
+
+	for (MediaEntity * candidate : entities){
+		std::unique_ptr<V4L2VideoDevice> video = std::make_unique<V4L2VideoDevice>(candidate);
+		ret = video->open();
+		if (ret)
+			continue;
+		if (video->caps().isMeta())
+			LOG(UVC, Info) << "FOUND META CAP AT: "<< video->deviceNode();
+		video->close(); 
+	}
+	return 0;
+}
+
 int UVCCameraData::init(MediaDevice *media)
 {
 	int ret;
@@ -421,13 +440,16 @@ int UVCCameraData::init(MediaDevice *media)
 				   [](MediaEntity *e) {
 					   return e->flags() & MEDIA_ENT_FL_DEFAULT;
 				   });
+
 	if (entity == entities.end()) {
 		LOG(UVC, Error) << "Could not find a default video device";
 		return -ENODEV;
 	}
+	findMetaData(entities);
 
 	/* Create and open the video device. */
 	video_ = std::make_unique<V4L2VideoDevice>(*entity);
+
 	ret = video_->open();
 	if (ret)
 		return ret;
