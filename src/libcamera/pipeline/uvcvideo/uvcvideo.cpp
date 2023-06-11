@@ -52,7 +52,6 @@ public:
 	std::unique_ptr<V4L2VideoDevice> metadata_;
 	Stream stream_;
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
-	int findMetaData(const std::vector<MediaEntity *> &entities);
 
 private:
 	bool generateId();
@@ -413,26 +412,11 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 	return true;
 }
 
-//check every entity and see if the video version of it a) succeeds and b) has the metadata caps
-int UVCCameraData::findMetaData(const std::vector<MediaEntity *> &entities){
-	int ret =0;
-	LOG(UVC, Info) << "Searching for metadata device";
-
-	for (MediaEntity * candidate : entities){
-		std::unique_ptr<V4L2VideoDevice> video = std::make_unique<V4L2VideoDevice>(candidate);
-		ret = video->open();
-		if (ret)
-			continue;
-		if (video->caps().isMeta())
-			LOG(UVC, Info) << "FOUND META CAP AT: "<< video->deviceNode();
-		video->close(); 
-	}
-	return 0;
-}
-
 int UVCCameraData::init(MediaDevice *media)
 {
 	int ret;
+    std::string node("");
+
 
 	/* Locate and initialise the camera data with the default video node. */
 	const std::vector<MediaEntity *> &entities = media->entities();
@@ -445,11 +429,10 @@ int UVCCameraData::init(MediaDevice *media)
 		LOG(UVC, Error) << "Could not find a default video device";
 		return -ENODEV;
 	}
-	findMetaData(entities);
 
 	/* Create and open the video device. */
 	video_ = std::make_unique<V4L2VideoDevice>(*entity);
-
+    
 	ret = video_->open();
 	if (ret)
 		return ret;
@@ -533,6 +516,30 @@ int UVCCameraData::init(MediaDevice *media)
 	}
 
 	controlInfo_ = ControlInfoMap(std::move(ctrls), controls::controls);
+
+	LOG(UVC, Info) << "Searching for metadata device";
+
+    //a metadata node has a valid deviceNode and is not the default we found above
+    auto metadata = std::find_if(entities.begin(), entities.end(),
+				   [](MediaEntity *e) {
+					   return e->deviceNode() != "" && e->deviceNode() != entity->deviceNode();
+				   });
+
+	if (metadata == entities.end()) {
+		LOG(UVC, Error) << "Could not find a metadata video device";
+        metadata_ = NULL;
+	}else{
+        //configure the metadata node
+        metadata_ = std::make_unique<V4L2VideoDevice>(* metadata);
+        ret = metadata_->open();
+        if (ret || !(metadata_->caps().isMeta()){
+            //if it fails to open or if the caps do in fact not have the metadata attribute (shouldn't happen)
+           metadata_ = NULL;// todo: what does make_unique actually do????
+           return 0;
+        }
+
+        //metadata_->bufferReady.connect(this, &UVCCameraData::bufferReady);
+    }
 
 	return 0;
 }
