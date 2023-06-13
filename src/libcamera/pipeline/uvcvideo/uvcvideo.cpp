@@ -41,6 +41,7 @@ public:
 	{
 	}
 
+	int initMetadata(MediaDevice *media);
 	int init(MediaDevice *media);
 	void addControl(uint32_t cid, const ControlInfo &v4l2info,
 			ControlInfoMap::Map *ctrls);
@@ -412,11 +413,39 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 	return true;
 }
 
+int UVCCameraData::initMetadata(MediaDevice *media){
+	int ret;
+
+	const std::vector<MediaEntity *> &entities = media->entities();
+    /* a metadata node has a valid deviceNode and is not the default node */
+	std::string dev_node_name = video_->deviceNode();
+    auto metadata = std::find_if(entities.begin(), entities.end(),
+				   [&dev_node_name](MediaEntity *e) {
+					   return e->deviceNode() != "" && e->deviceNode() != dev_node_name;
+				   });
+
+	if (metadata == entities.end()) {
+		LOG(UVC, Error) << "Could not find a metadata video device.";
+        metadata_ = NULL;
+		return 0;
+	}
+
+	/* configure the metadata node */
+	metadata_ = std::make_unique<V4L2VideoDevice>(* metadata);
+	ret = metadata_->open();
+	if (ret || !(metadata_->caps().isMeta())){
+		/* if it fails to open or if the caps do in fact not have the metadata attribute (shouldn't happen) */
+		metadata_ = NULL;
+		return 0;
+	}
+	//TODO: configure the buffer stream.  For now, just print.
+	LOG(UVC, Info) << "metadata node has been opened at "<< metadata_->deviceNode();
+	return 0;
+}
+
 int UVCCameraData::init(MediaDevice *media)
 {
 	int ret;
-    std::string node("");
-
 
 	/* Locate and initialise the camera data with the default video node. */
 	const std::vector<MediaEntity *> &entities = media->entities();
@@ -517,32 +546,9 @@ int UVCCameraData::init(MediaDevice *media)
 
 	controlInfo_ = ControlInfoMap(std::move(ctrls), controls::controls);
 
-	LOG(UVC, Info) << "Searching for metadata device";
-
-    //a metadata node has a valid deviceNode and is not the default we found above
-	std::string dev_node_name = video_->deviceNode();
-    auto metadata = std::find_if(entities.begin(), entities.end(),
-				   [&dev_node_name](MediaEntity *e) {
-					   return e->deviceNode() != "" && e->deviceNode() != dev_node_name;
-				   });
-
-	if (metadata == entities.end()) {
-		LOG(UVC, Error) << "Could not find a metadata video device";
-        metadata_ = NULL;
-	}else{
-        //configure the metadata node
-        metadata_ = std::make_unique<V4L2VideoDevice>(* metadata);
-        ret = metadata_->open();
-        if (ret || !(metadata_->caps().isMeta())){
-            //if it fails to open or if the caps do in fact not have the metadata attribute (shouldn't happen)
-           metadata_ = NULL;// todo: what does make_unique actually do????
-           return 0;
-        }
-		LOG(UVC, Info) << "metadata node has been opened at "<< metadata_->deviceNode();
-
-        //metadata_->bufferReady.connect(this, &UVCCameraData::bufferReady);
-    }
-
+	ret = initMetadata(media);
+	// todo: handle a failure of the metadata opening, including arranging for the old
+	// timestamping method to be used and for appropriate user warnings.  
 	return 0;
 }
 
