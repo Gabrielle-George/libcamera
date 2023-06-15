@@ -427,7 +427,7 @@ int UVCCameraData::initMetadata(MediaDevice *media){
 	if (metadata == entities.end()) {
 		LOG(UVC, Error) << "Could not find a metadata video device.";
         metadata_ = NULL;
-		return 0;
+		return -1;
 	}
 
 	/* configure the metadata node */
@@ -436,7 +436,7 @@ int UVCCameraData::initMetadata(MediaDevice *media){
 	if (ret || !(metadata_->caps().isMeta())){
 		/* if it fails to open or if the caps do in fact not have the metadata attribute (shouldn't happen) */
 		metadata_ = NULL;
-		return 0;
+		return -2;
 	}
 	//TODO: configure the buffer stream.  For now, just print.
 	LOG(UVC, Info) << "metadata node has been opened at "<< metadata_->deviceNode();
