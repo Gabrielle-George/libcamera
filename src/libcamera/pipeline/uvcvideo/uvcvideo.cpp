@@ -52,10 +52,15 @@ public:
 	std::unique_ptr<V4L2VideoDevice> video_;
 	std::unique_ptr<V4L2VideoDevice> metadata_;
 	Stream stream_;
+	Stream metadataStream_;
+	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
+
+
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 
 private:
 	bool generateId();
+
 
 	std::string id_;
 };
@@ -78,6 +83,8 @@ public:
 
 	std::unique_ptr<CameraConfiguration> generateConfiguration(Camera *camera,
 		const StreamRoles &roles) override;
+	void printFormat(V4L2DeviceFormat &f);
+	int configureMetaData(Camera *camera);
 	int configure(Camera *camera, CameraConfiguration *config) override;
 
 	int exportFrameBuffers(Camera *camera, Stream *stream,
@@ -172,6 +179,12 @@ CameraConfiguration::Status UVCCameraConfiguration::validate()
 		status = Adjusted;
 	}
 
+	V4L2DeviceFormat metaformat;
+	metaformat.fourcc = V4L2PixelFormat(V4L2_META_FMT_UVC);
+	format.size = cfg.size;
+	//int ret = data_->metadata_->tryFormat(&metaformat);
+	LOG(UVC, Gab)
+			<< "Ret value of metadata try format: " << ret;
 	return status;
 }
 
@@ -205,10 +218,40 @@ PipelineHandlerUVC::generateConfiguration(Camera *camera,
 	return config;
 }
 
+
+int PipelineHandlerUVC::configureMetaData(Camera *camera){
+
+	UVCCameraData *data = cameraData(camera);
+	int ret;
+
+	V4L2DeviceFormat format;
+	format.fourcc = V4L2PixelFormat(V4L2_META_FMT_UVC);
+	//below from vc4.cpp:644
+	format.planes[0].size = 12;
+	//data->//&embeddedFormat);
+	//sensor_->device()->getFormat(1, &embeddedFormat);
+
+
+
+	ret = data->metadata_->getFormat(&format);
+
+	LOG(UVC,Gab) << "Format size: "<< format.planes[0].size;
+	LOG(UVC,Gab) << "FourCC: " << format.fourcc.toString();
+	if (ret){
+		LOG(UVC,Gab) << "SET FORMAT FAILED!!!";
+		return ret;
+	}
+
+
+	//TODO: check for errors!
+	return 0;
+}
+//-Wno-error
 int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 {
 	UVCCameraData *data = cameraData(camera);
 	StreamConfiguration &cfg = config->at(0);
+	
 	int ret;
 
 	V4L2DeviceFormat format;
@@ -224,6 +267,10 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 		return -EINVAL;
 
 	cfg.setStream(&data->stream_);
+	
+	//cfg.setStream(&data->stream_);
+
+	configureMetaData(camera); //DON'T NEED???
 
 	return 0;
 }
@@ -231,24 +278,47 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 					   std::vector<std::unique_ptr<FrameBuffer>> *buffers)
 {
+	LOG(UVC, Gab) << "***Exporting frame buffers\n";
+
 	UVCCameraData *data = cameraData(camera);
+;
 	unsigned int count = stream->configuration().bufferCount;
+
+	//TODO: HOW????
+	//data->metadata_->exportBuffers(count, buffers);
+	//export the buffers managed internally:
+	int ret = data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
+	LOG(UVC, Gab) << "Result of exporting frame buffers: " << ret ;
+
 
 	return data->video_->exportBuffers(count, buffers);
 }
 
 int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList *controls)
 {
+	LOG(UVC,Gab) << "***Starting camera and metadata(TODO).";
+
 	UVCCameraData *data = cameraData(camera);
 	unsigned int count = data->stream_.configuration().bufferCount;
+	LOG(UVC, Gab) << "Importing frame buffers\n";
 
 	int ret = data->video_->importBuffers(count);
 	if (ret < 0)
 		return ret;
 
+
 	ret = data->video_->streamOn();
 	if (ret < 0) {
 		data->video_->releaseBuffers();
+		return ret;
+	}
+
+	//metadata
+	 ret = data->metadata_->importBuffers(count);
+
+	ret = data->metadata_->streamOn();
+	if (ret < 0) {
+		data->metadata_->releaseBuffers();
 		return ret;
 	}
 
@@ -366,6 +436,8 @@ int PipelineHandlerUVC::processControls(UVCCameraData *data, Request *request)
 
 int PipelineHandlerUVC::queueRequestDevice(Camera *camera, Request *request)
 {
+	LOG(UVC,Gab) << "***Queueing metadata request(TODO).";
+
 	UVCCameraData *data = cameraData(camera);
 	FrameBuffer *buffer = request->findBuffer(&data->stream_);
 	if (!buffer) {
@@ -388,6 +460,8 @@ int PipelineHandlerUVC::queueRequestDevice(Camera *camera, Request *request)
 
 bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 {
+	LOG(UVC,Gab) << "*** Matching UVC.";
+
 	MediaDevice *media;
 	DeviceMatch dm("uvcvideo");
 
@@ -398,11 +472,11 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 	std::unique_ptr<UVCCameraData> data = std::make_unique<UVCCameraData>(this);
 	
 	if (data->init(media))
-		return false;
+		return false;	
 
 	/* Create and register the camera. */
 	std::string id = data->id();
-	std::set<Stream *> streams{ &data->stream_ };
+	std::set<Stream *> streams{ &data->stream_ , &data->metadataStream_};
 	std::shared_ptr<Camera> camera =
 		Camera::create(std::move(data), id, streams);
 	registerCamera(std::move(camera));
@@ -415,6 +489,7 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 
 int UVCCameraData::initMetadata(MediaDevice *media){
 	int ret;
+	LOG(UVC,Gab) << "*** Initializing metadata.";
 
 	const std::vector<MediaEntity *> &entities = media->entities();
     /* a metadata node has a valid deviceNode and is not the default node */
@@ -430,16 +505,25 @@ int UVCCameraData::initMetadata(MediaDevice *media){
 		return -1;
 	}
 
+	V4L2DeviceFormat embeddedFormat;
+
+
 	/* configure the metadata node */
-	metadata_ = std::make_unique<V4L2VideoDevice>(* metadata);
+	metadata_= std::make_unique<V4L2VideoDevice>(* metadata);
+
+
 	ret = metadata_->open();
+	for (const auto &format : metadata_->formats()) {
+		LOG(UVC, Gab)<< format.first.toString();
+	}
+
 	if (ret || !(metadata_->caps().isMeta())){
 		/* if it fails to open or if the caps do in fact not have the metadata attribute (shouldn't happen) */
 		metadata_ = NULL;
 		return -1;
 	}
 	//TODO: configure the buffer stream.  For now, just print.
-	LOG(UVC, Info) << "metadata node has been opened at "<< metadata_->deviceNode();
+	LOG(UVC, Gab) << "metadata node has been opened at "<< metadata_->deviceNode();
 	return 0;
 }
 
@@ -467,6 +551,7 @@ int UVCCameraData::init(MediaDevice *media)
 		return ret;
 
 	video_->bufferReady.connect(this, &UVCCameraData::bufferReady);
+	//metadata_->bufferReady.connect(this, &UVCCameraData::bufferReady);
 
 	/* Generate the camera ID. */
 	if (!generateId()) {
@@ -736,6 +821,8 @@ void UVCCameraData::addControl(uint32_t cid, const ControlInfo &v4l2Info,
 
 void UVCCameraData::bufferReady(FrameBuffer *buffer)
 {
+	LOG(UVC,Gab) << "*** Buffer ready (TODO).";
+
 	Request *request = buffer->request();
 
 	/* \todo Use the UVC metadata to calculate a more precise timestamp */
