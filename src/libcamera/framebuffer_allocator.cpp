@@ -90,6 +90,7 @@ int FrameBufferAllocator::allocate(Stream *stream)
 {
 	const auto &[it, inserted] = buffers_.try_emplace(stream);
 
+	LOG(Allocator, Gab) << "Buffer Size: " << buffers_.size();
 	if (!inserted) {
 		LOG(Allocator, Error) << "Buffers already allocated for stream";
 		return -EBUSY;

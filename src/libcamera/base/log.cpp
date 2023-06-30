@@ -89,6 +89,7 @@ static const char *log_severity_name(LogSeverity severity)
 		" WARN",
 		"ERROR",
 		"FATAL",
+		"  GAB",
 	};
 
 	if (static_cast<unsigned int>(severity) < std::size(names))
@@ -212,6 +213,7 @@ void LogOutput::write(const LogMessage &msg)
 		kColorBrightGreen,
 		kColorBrightYellow,
 		kColorBrightRed,
+		kColorBrightMagenta,
 		kColorBrightMagenta,
 	};
 
@@ -683,6 +685,7 @@ LogSeverity Logger::parseLogLevel(const std::string &level)
 		"WARN",
 		"ERROR",
 		"FATAL",
+		"GAB"
 	};
 
 	int severity;

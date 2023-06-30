@@ -433,7 +433,12 @@ bool V4L2BufferCache::Entry::operator==(const FrameBuffer &buffer) const
 const std::string V4L2DeviceFormat::toString() const
 {
 	std::stringstream ss;
-	ss << *this;
+	ss << *this << ": \n";
+	ss << "Planes: ";
+	for (Plane p : planes){
+		ss << p.size << ": " << p.bpl;
+	}
+	ss << "\nSize: " <<size.height << " x " << size.width;
 
 	return ss.str();
 }
@@ -861,7 +866,9 @@ int V4L2VideoDevice::setFormat(V4L2DeviceFormat *format)
 }
 
 int V4L2VideoDevice::getFormatMeta(V4L2DeviceFormat *format)
-{
+{		
+	LOG(V4L2, Gab) << "Getting format metadat!: " ;
+
 	struct v4l2_format v4l2Format = {};
 	struct v4l2_meta_format *pix = &v4l2Format.fmt.meta;
 	int ret;
@@ -879,12 +886,15 @@ int V4L2VideoDevice::getFormatMeta(V4L2DeviceFormat *format)
 	format->planesCount = 1;
 	format->planes[0].bpl = pix->buffersize;
 	format->planes[0].size = pix->buffersize;
+	LOG(V4L2, Gab) << format->toString();
 
 	return 0;
 }
 
 int V4L2VideoDevice::trySetFormatMeta(V4L2DeviceFormat *format, bool set)
-{
+{	
+	LOG(V4L2, Gab) << "Trying set format!: " ;
+
 	struct v4l2_format v4l2Format = {};
 	struct v4l2_meta_format *pix = &v4l2Format.fmt.meta;
 	int ret;
@@ -1234,6 +1244,8 @@ int V4L2VideoDevice::requestBuffers(unsigned int count,
 
 	rb.count = count;
 	rb.type = bufferType_;
+	LOG(V4L2, Gab) << "Type: " << rb.type;
+
 	rb.memory = memoryType;
 
 	ret = ioctl(VIDIOC_REQBUFS, &rb);
@@ -1336,11 +1348,18 @@ int V4L2VideoDevice::allocateBuffers(unsigned int count,
 int V4L2VideoDevice::exportBuffers(unsigned int count,
 				   std::vector<std::unique_ptr<FrameBuffer>> *buffers)
 {
+	LOG(V4L2, Gab) << "Prepared to export " << count << " buffers";
+	LOG(V4L2, Gab) << "BEFORE: " << buffers->size();
+
 	int ret = createBuffers(count, buffers);
+	LOG(V4L2, Gab) << "AFTER: " << buffers->size();
+
 	if (ret < 0)
 		return ret;
 
 	requestBuffers(0, V4L2_MEMORY_MMAP);
+
+	LOG(V4L2, Gab) << "Finished exporting " << count << " buffers";
 
 	return ret;
 }
@@ -1505,6 +1524,9 @@ UniqueFD V4L2VideoDevice::exportDmabufFd(unsigned int index,
  */
 int V4L2VideoDevice::importBuffers(unsigned int count)
 {
+
+	LOG(V4L2, Gab) << "Prepared to import " << count << " buffers";
+	
 	if (cache_) {
 		LOG(V4L2, Error) << "Buffers already allocated";
 		return -EINVAL;
@@ -1519,6 +1541,7 @@ int V4L2VideoDevice::importBuffers(unsigned int count)
 	cache_ = new V4L2BufferCache(count);
 
 	LOG(V4L2, Debug) << "Prepared to import " << count << " buffers";
+	LOG(V4L2, Gab) << "Finished importing " << count << " buffers";
 
 	return 0;
 }
@@ -1540,6 +1563,7 @@ int V4L2VideoDevice::releaseBuffers()
 
 	delete cache_;
 	cache_ = nullptr;
+	
 
 	return requestBuffers(0, memoryType_);
 }
