@@ -46,6 +46,8 @@ public:
 	void addControl(uint32_t cid, const ControlInfo &v4l2info,
 			ControlInfoMap::Map *ctrls);
 	void bufferReady(FrameBuffer *buffer);
+	void bufferReadyMetadata(FrameBuffer *buffer);
+
 
 	const std::string &id() const { return id_; }
 
@@ -285,11 +287,59 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 	unsigned int count = stream->configuration().bufferCount;
 
 	//TODO: HOW????
-	//data->metadata_->exportBuffers(count, buffers);
+	//data->metadata_->exportBuffers(count, &data->metadataBuffers_);
 	//export the buffers managed internally:
-	int ret = data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
-	LOG(UVC, Gab) << "Result of exporting frame buffers: " << ret ;
+	data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
+	//LOG(UVC, Gab) << "Result of exporting frame buffers: " << ret ;
+	//use mmap to get the buffers for metadata, as metadata does not support exporting buffers at the moment. 
+	
+	// for (int i = 0; i < count; i++){
+	// 	//std::make_unique<UVCCameraData>(this)
+	// 	data->metadataBuffers_.push_back(std::make_unique<FrameBuffer>())
 
+	// }
+
+
+	// //assert(data->metadataBuffers_ != NULL);
+
+	// for (int i = 0; i < count; i++) {
+	// 	struct v4l2_buffer buffer;
+	// 	struct v4l2_plane planes[8];
+
+	// 	memset(&buffer, 0, sizeof(buffer));
+	// 	buffer.type = 13;
+	// 	buffer.memory = V4L2_MEMORY_MMAP;
+	// 	buffer.index = 0;
+	// 	/* length in struct v4l2_buffer in multi-planar API stores the size
+	// 	* of planes array. */
+	// 	buffer.length = 8;
+	// 	buffer.m.planes = planes;
+
+	// 	int ret = ioctl(VIDIOC_QUERYBUF, &buf);
+	// 	if (ret < 0) {
+	// 		LOG(V4L2, Error)
+	// 			<< "Unable to query buffer " << index << ": "
+	// 			<< strerror(-ret);
+	// 		return nullptr;
+	// 	}
+
+	// 	/* Every plane has to be mapped separately */
+	// 	for (j = 0; j < FMT_NUM_PLANES; j++) {
+	// 		buffers[i].length[j] = buffer.m.planes[j].length; /* remember for munmap() */
+
+	// 		buffers[i].start[j] = mmap(NULL, buffer.m.planes[j].length,
+	// 				PROT_READ | PROT_WRITE, /* recommended */
+	// 				MAP_SHARED,             /* recommended */
+	// 				fd, buffer.m.planes[j].m.offset);
+
+	// 		if (MAP_FAILED == buffers[i].start[j]) {
+	// 			/* If you do not exit here you should unmap() and free()
+	// 			the buffers and planes mapped so far. */
+	// 			perror("mmap");
+	// 			exit(EXIT_FAILURE);
+	// 		}
+	// 	}
+	// }
 
 	return data->video_->exportBuffers(count, buffers);
 }
@@ -314,11 +364,19 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 	}
 
 	//metadata
-	 ret = data->metadata_->importBuffers(count);
+	 //ret = data->metadata_->importBuffers(count);
 
 	ret = data->metadata_->streamOn();
+	//	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
+
+	for (std::unique_ptr<FrameBuffer> &buf : data->metadataBuffers_){
+		ret = data->metadata_->queueBuffer(buf.get());
+		if (ret < 0)
+			return ret;
+
+	}
 	if (ret < 0) {
-		data->metadata_->releaseBuffers();
+		//data->metadata_->releaseBuffers();
 		return ret;
 	}
 
@@ -330,6 +388,8 @@ void PipelineHandlerUVC::stopDevice(Camera *camera)
 	UVCCameraData *data = cameraData(camera);
 	data->video_->streamOff();
 	data->video_->releaseBuffers();
+
+	data->metadata_->streamOff();
 }
 
 int PipelineHandlerUVC::processControl(ControlList *controls, unsigned int id,
@@ -551,7 +611,6 @@ int UVCCameraData::init(MediaDevice *media)
 		return ret;
 
 	video_->bufferReady.connect(this, &UVCCameraData::bufferReady);
-	//metadata_->bufferReady.connect(this, &UVCCameraData::bufferReady);
 
 	/* Generate the camera ID. */
 	if (!generateId()) {
@@ -632,6 +691,8 @@ int UVCCameraData::init(MediaDevice *media)
 	controlInfo_ = ControlInfoMap(std::move(ctrls), controls::controls);
 
 	ret = initMetadata(media);
+	metadata_->bufferReady.connect(this, &UVCCameraData::bufferReadyMetadata);
+
 	// todo: handle a failure of the metadata opening, including arranging for the old
 	// timestamping method to be used and for appropriate user warnings.  
 	return 0;
@@ -821,8 +882,6 @@ void UVCCameraData::addControl(uint32_t cid, const ControlInfo &v4l2Info,
 
 void UVCCameraData::bufferReady(FrameBuffer *buffer)
 {
-	LOG(UVC,Gab) << "*** Buffer ready (TODO).";
-
 	Request *request = buffer->request();
 
 	/* \todo Use the UVC metadata to calculate a more precise timestamp */
@@ -831,6 +890,20 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 
 	pipe()->completeBuffer(request, buffer);
 	pipe()->completeRequest(request);
+}
+
+void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
+{
+	LOG(UVC,Gab) << "*** METADATA BUFFER AVAILABL!!!!! " << buffer->metadata().timestamp;
+
+	// Request *request = buffer->request();
+
+	// /* \todo Use the UVC metadata to calculate a more precise timestamp */
+	// request->metadata().set(controls::SensorTimestamp,
+	// 			buffer->metadata().timestamp);
+
+	// pipe()->completeBuffer(request, buffer);
+	// pipe()->completeRequest(request);
 }
 
 REGISTER_PIPELINE_HANDLER(PipelineHandlerUVC)
