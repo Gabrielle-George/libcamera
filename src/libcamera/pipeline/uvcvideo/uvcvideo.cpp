@@ -259,60 +259,8 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 ;
 	unsigned int count = stream->configuration().bufferCount;
 
-	//TODO: HOW????
-	//data->metadata_->exportBuffers(count, &data->metadataBuffers_);
-	//export the buffers managed internally:
 	data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
-	//LOG(UVC, Gab) << "Result of exporting frame buffers: " << ret ;
-	//use mmap to get the buffers for metadata, as metadata does not support exporting buffers at the moment. 
-	
-	// for (int i = 0; i < count; i++){
-	// 	//std::make_unique<UVCCameraData>(this)
-	// 	data->metadataBuffers_.push_back(std::make_unique<FrameBuffer>())
-
-	// }
-
-
-	// //assert(data->metadataBuffers_ != NULL);
-
-	// for (int i = 0; i < count; i++) {
-	// 	struct v4l2_buffer buffer;
-	// 	struct v4l2_plane planes[8];
-
-	// 	memset(&buffer, 0, sizeof(buffer));
-	// 	buffer.type = 13;
-	// 	buffer.memory = V4L2_MEMORY_MMAP;
-	// 	buffer.index = 0;
-	// 	/* length in struct v4l2_buffer in multi-planar API stores the size
-	// 	* of planes array. */
-	// 	buffer.length = 8;
-	// 	buffer.m.planes = planes;
-
-	// 	int ret = ioctl(VIDIOC_QUERYBUF, &buf);
-	// 	if (ret < 0) {
-	// 		LOG(V4L2, Error)
-	// 			<< "Unable to query buffer " << index << ": "
-	// 			<< strerror(-ret);
-	// 		return nullptr;
-	// 	}
-
-	// 	/* Every plane has to be mapped separately */
-	// 	for (j = 0; j < FMT_NUM_PLANES; j++) {
-	// 		buffers[i].length[j] = buffer.m.planes[j].length; /* remember for munmap() */
-
-	// 		buffers[i].start[j] = mmap(NULL, buffer.m.planes[j].length,
-	// 				PROT_READ | PROT_WRITE, /* recommended */
-	// 				MAP_SHARED,             /* recommended */
-	// 				fd, buffer.m.planes[j].m.offset);
-
-	// 		if (MAP_FAILED == buffers[i].start[j]) {
-	// 			/* If you do not exit here you should unmap() and free()
-	// 			the buffers and planes mapped so far. */
-	// 			perror("mmap");
-	// 			exit(EXIT_FAILURE);
-	// 		}
-	// 	}
-	// }
+	//store mappedFrameBuffers here
 
 	return data->video_->exportBuffers(count, buffers);
 }
@@ -876,7 +824,8 @@ struct UVC_Block {
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
 	LOG(UVC,Gab) << "*** METADATA BUFFER AVAILABLE! " << buffer->metadata().timestamp;
-	UVC_Block data;
+	//todo: do the following in the allocation step, and store them 
+	//within the uvccameradata
 	void * address = mmap(NULL, buffer->planes()[0].length,
 			PROT_READ | PROT_WRITE, /* recommended */
 			MAP_SHARED,             /* recommended */
@@ -888,28 +837,37 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 		return;
 	}
 
-	uint8_t * bufferAddr = static_cast<uint8_t *>(address);
+	UVC_Block * data = static_cast<UVC_Block *>(address);
 
-	LOG(UVC, Gab) << "address at " << reinterpret_cast<void *>(bufferAddr);
+	LOG(UVC, Gab) << "address at " << reinterpret_cast<void *>(data);
 
-	memcpy(&data,address,sizeof(UVC_Block));
-	LOG(UVC, Gab) << "ts: " << data.ts;
-	LOG(UVC, Gab) << "sof: " << data.sof;
-	LOG(UVC, Gab) << "length: " << data.length;
-	LOG(UVC, Gab) << "flags: " << data.flags;
+	//memcpy(&data,address,sizeof(UVC_Block));
+	LOG(UVC, Gab) << "ts: " << data->ts;
+	LOG(UVC, Gab) << "sof: " << data->sof;
+	//LOG(UVC, Gab) << "length: " << data.length;
+	//LOG(UVC, Gab) << "flags: " << data.flags;
 
-	LOG(UVC, Gab) << "buffer timestamp: " << data.ts;
+	LOG(UVC, Gab) << "buffer timestamp: " << data->ts;
 	LOG(UVC, Gab) << "    md timestamp: " << buffer->metadata().timestamp;
+	//todo: check the buffer state to make sure it's valid.
 	int ret = metadata_->queueBuffer(buffer);
 
 	LOG(UVC, Gab) << "ret: " << ret;
+	//todo: unmap only in cleanup
+	munmap(address,buffer->planes()[0].length);
 
-	// Request *request = buffer->request();
+	// Request *request = buffer->request(); //this is invalid!
+	//solution: set up a queue to store the request so we can have
+	//access from within here
 
 	// /* \todo Use the UVC metadata to calculate a more precise timestamp */
 	// request->metadata().set(controls::SensorTimestamp,
 	// 			buffer->metadata().timestamp);
 
+
+//todo: NEED TO DO THIS
+//need to complete the request when both metadata 
+//and image data frame comes in
 	 //pipe()->completeBuffer(request, buffer);
 	//pipe()->completeRequest(request);
 }
