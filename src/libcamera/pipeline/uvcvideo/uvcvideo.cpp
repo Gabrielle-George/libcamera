@@ -11,6 +11,8 @@
 #include <math.h>
 #include <memory>
 #include <tuple>
+#include <sys/mman.h>
+
 
 #include <libcamera/base/log.h>
 #include <libcamera/base/utils.h>
@@ -219,34 +221,6 @@ PipelineHandlerUVC::generateConfiguration(Camera *camera,
 	return config;
 }
 
-
-int PipelineHandlerUVC::configureMetaData(Camera *camera){
-
-	UVCCameraData *data = cameraData(camera);
-	int ret;
-
-	V4L2DeviceFormat format;
-	format.fourcc = V4L2PixelFormat(V4L2_META_FMT_UVC);
-	//below from vc4.cpp:644
-	format.planes[0].size = 12;
-	//data->//&embeddedFormat);
-	//sensor_->device()->getFormat(1, &embeddedFormat);
-
-
-
-	ret = data->metadata_->getFormat(&format);
-
-	LOG(UVC,Gab) << "Format size: "<< format.planes[0].size;
-	LOG(UVC,Gab) << "FourCC: " << format.fourcc.toString();
-	if (ret){
-		LOG(UVC,Gab) << "SET FORMAT FAILED!!!";
-		return ret;
-	}
-
-
-	//TODO: check for errors!
-	return 0;
-}
 //-Wno-error
 int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 {
@@ -271,7 +245,7 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 	
 	//cfg.setStream(&data->stream_);
 
-	configureMetaData(camera); //DON'T NEED???
+	//configureMetaData(camera); //DON'T NEED???
 
 	return 0;
 }
@@ -891,9 +865,44 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	pipe()->completeRequest(request);
 }
 
+struct UVC_Block {
+	__u64	 ts;
+	__u16 sof;
+	__u8 length;
+	__u8 flags;
+	__u8 buf[15]; //TODO: change me!;
+};
+
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
-	LOG(UVC,Gab) << "*** METADATA BUFFER AVAILABL!!!!! " << buffer->metadata().timestamp;
+	LOG(UVC,Gab) << "*** METADATA BUFFER AVAILABLE! " << buffer->metadata().timestamp;
+	UVC_Block data;
+	void * address = mmap(NULL, buffer->planes()[0].length,
+			PROT_READ | PROT_WRITE, /* recommended */
+			MAP_SHARED,             /* recommended */
+			metadata_->fd(), buffer->planes()[0].offset);
+
+	if (address == MAP_FAILED) {
+		LOG(UVC, Gab) << "Failed to mmap plane: -"
+					<< strerror(errno);
+		return;
+	}
+
+	uint8_t * bufferAddr = static_cast<uint8_t *>(address);
+
+	LOG(UVC, Gab) << "address at " << reinterpret_cast<void *>(bufferAddr);
+
+	memcpy(&data,address,sizeof(UVC_Block));
+	LOG(UVC, Gab) << "ts: " << data.ts;
+	LOG(UVC, Gab) << "sof: " << data.sof;
+	LOG(UVC, Gab) << "length: " << data.length;
+	LOG(UVC, Gab) << "flags: " << data.flags;
+
+	LOG(UVC, Gab) << "buffer timestamp: " << data.ts;
+	LOG(UVC, Gab) << "    md timestamp: " << buffer->metadata().timestamp;
+	int ret = metadata_->queueBuffer(buffer);
+
+	LOG(UVC, Gab) << "ret: " << ret;
 
 	// Request *request = buffer->request();
 
@@ -901,8 +910,8 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	// request->metadata().set(controls::SensorTimestamp,
 	// 			buffer->metadata().timestamp);
 
-	// pipe()->completeBuffer(request, buffer);
-	// pipe()->completeRequest(request);
+	 //pipe()->completeBuffer(request, buffer);
+	//pipe()->completeRequest(request);
 }
 
 REGISTER_PIPELINE_HANDLER(PipelineHandlerUVC)
