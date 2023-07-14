@@ -35,6 +35,14 @@ namespace libcamera {
 
 LOG_DEFINE_CATEGORY(UVC)
 
+struct UVC_Block {
+	__u64	 ts;
+	__u16 sof;
+	__u8 length;
+	__u8 flags;
+	__u8 buf[15]; //TODO: change me!;
+};
+
 class UVCCameraData : public Camera::Private
 {
 public:
@@ -58,13 +66,13 @@ public:
 	Stream stream_;
 	Stream metadataStream_;
 	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
-
+	std::vector<std::unique_ptr<UVC_Block>> mappedMetaAddresses_;
 
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
+	bool isStopped;
 
 private:
 	bool generateId();
-
 
 	std::string id_;
 };
@@ -259,8 +267,35 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 ;
 	unsigned int count = stream->configuration().bufferCount;
 
-	data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
-	//store mappedFrameBuffers here
+	int ret = data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
+	if (ret==(int) count){
+
+		for (unsigned int i = 0; i < count; i++){
+			std::unique_ptr<FrameBuffer> &buffer = data->metadataBuffers_[i];
+			void * address = mmap(NULL, buffer->planes()[0].length,
+					PROT_READ | PROT_WRITE, 
+					MAP_SHARED,             
+					data->metadata_->fd(), buffer->planes()[0].offset);
+					///*buffer->planes()[0].fd.get()*/
+			
+			LOG(UVC, Gab) << "mmapped: "<<address << " for buffer: "<< reinterpret_cast<void *>(&buffer);
+
+			if (address == MAP_FAILED) {
+				LOG(UVC, Gab) << "Failed to mmap plane: -"
+							<< strerror(errno);
+				//todo: clean up all of the buffers.  We are not doing metadata anymore because
+				//we can't access the metadata
+			}
+
+			UVC_Block * dataBlock = static_cast<UVC_Block *>(address);
+			std::unique_ptr<UVC_Block> dataBlockPtr = std::unique_ptr<UVC_Block>{dataBlock};
+			data->mappedMetaAddresses_.push_back(std::move(dataBlockPtr));
+			buffer->setCookie(i);
+		}
+	}else{
+		LOG(UVC, Gab) << "***Exporting frame buffers FAILED\n";
+
+	}
 
 	return data->video_->exportBuffers(count, buffers);
 }
@@ -284,13 +319,13 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 		return ret;
 	}
 
-	//metadata
+		//metadata
 	 //ret = data->metadata_->importBuffers(count);
 
 	ret = data->metadata_->streamOn();
 	//	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
 
-	for (std::unique_ptr<FrameBuffer> &buf : data->metadataBuffers_){
+	 	for (std::unique_ptr<FrameBuffer> &buf : data->metadataBuffers_){
 		ret = data->metadata_->queueBuffer(buf.get());
 		if (ret < 0)
 			return ret;
@@ -306,11 +341,21 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 
 void PipelineHandlerUVC::stopDevice(Camera *camera)
 {
+
+	//unsigned int i;
 	UVCCameraData *data = cameraData(camera);
+
+			data->isStopped = true;
+
 	data->video_->streamOff();
 	data->video_->releaseBuffers();
 
 	data->metadata_->streamOff();
+	// for (i = 0; i < data->mappedMetaAddresses_.size(); i++){
+	// 	munmap(data->mappedMetaAddresses_[i].get(),data->metadataBuffers_[i]->planes()[0].length);
+	// }
+
+	// data->isStopped = true;
 }
 
 int PipelineHandlerUVC::processControl(ControlList *controls, unsigned int id,
@@ -803,6 +848,8 @@ void UVCCameraData::addControl(uint32_t cid, const ControlInfo &v4l2Info,
 
 void UVCCameraData::bufferReady(FrameBuffer *buffer)
 {
+	LOG(UVC,Gab) << "*** NORMAL BUFFER AVAILABLE! " << buffer->metadata().timestamp;
+
 	Request *request = buffer->request();
 
 	/* \todo Use the UVC metadata to calculate a more precise timestamp */
@@ -813,48 +860,29 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	pipe()->completeRequest(request);
 }
 
-struct UVC_Block {
-	__u64	 ts;
-	__u16 sof;
-	__u8 length;
-	__u8 flags;
-	__u8 buf[15]; //TODO: change me!;
-};
 
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
+	int pos;
 	LOG(UVC,Gab) << "*** METADATA BUFFER AVAILABLE! " << buffer->metadata().timestamp;
-	//todo: do the following in the allocation step, and store them 
-	//within the uvccameradata
-	void * address = mmap(NULL, buffer->planes()[0].length,
-			PROT_READ | PROT_WRITE, /* recommended */
-			MAP_SHARED,             /* recommended */
-			metadata_->fd(), buffer->planes()[0].offset);
 
-	if (address == MAP_FAILED) {
-		LOG(UVC, Gab) << "Failed to mmap plane: -"
-					<< strerror(errno);
-		return;
-	}
+	pos = buffer->cookie();
+	LOG(UVC,Gab) << "position of buffer: " << pos;
 
-	UVC_Block * data = static_cast<UVC_Block *>(address);
+	LOG(UVC, Gab) << "ts: " << mappedMetaAddresses_[pos]->ts;
+	LOG(UVC, Gab) << "sof: " << mappedMetaAddresses_[pos]->sof;
 
-	LOG(UVC, Gab) << "address at " << reinterpret_cast<void *>(data);
-
-	//memcpy(&data,address,sizeof(UVC_Block));
-	LOG(UVC, Gab) << "ts: " << data->ts;
-	LOG(UVC, Gab) << "sof: " << data->sof;
-	//LOG(UVC, Gab) << "length: " << data.length;
-	//LOG(UVC, Gab) << "flags: " << data.flags;
-
-	LOG(UVC, Gab) << "buffer timestamp: " << data->ts;
+	LOG(UVC, Gab) << "buffer timestamp: " << mappedMetaAddresses_[pos]->ts;
 	LOG(UVC, Gab) << "    md timestamp: " << buffer->metadata().timestamp;
 	//todo: check the buffer state to make sure it's valid.
-	int ret = metadata_->queueBuffer(buffer);
 
-	LOG(UVC, Gab) << "ret: " << ret;
-	//todo: unmap only in cleanup
-	munmap(address,buffer->planes()[0].length);
+	// if (!isStopped){
+	//int ret = metadata_->queueBuffer(buffer);
+
+	 //	LOG(UVC, Gab) << "ret: " << ret;
+	// }
+	//todo: unmap only in cleanupS
+	//munmap(address,buffer->planes()[0].length);
 
 	// Request *request = buffer->request(); //this is invalid!
 	//solution: set up a queue to store the request so we can have
