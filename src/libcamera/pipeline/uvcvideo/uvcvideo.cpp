@@ -41,6 +41,7 @@ public:
 	{
 	}
 
+	int initMetadata(MediaDevice *media);
 	int init(MediaDevice *media);
 	void addControl(uint32_t cid, const ControlInfo &v4l2info,
 			ControlInfoMap::Map *ctrls);
@@ -49,6 +50,7 @@ public:
 	const std::string &id() const { return id_; }
 
 	std::unique_ptr<V4L2VideoDevice> video_;
+	std::unique_ptr<V4L2VideoDevice> metadata_;
 	Stream stream_;
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 
@@ -411,6 +413,37 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 	return true;
 }
 
+int UVCCameraData::initMetadata(MediaDevice *media)
+{
+	int ret;
+	const std::vector<MediaEntity *> &entities = media->entities();
+
+	/* a metadata node has a valid deviceNode and is not the default node */
+	std::string dev_node_name = video_->deviceNode();
+	auto metadata = std::find_if(entities.begin(), entities.end(),
+				     [&dev_node_name](MediaEntity *e) {
+					     return e->deviceNode() != "" && e->deviceNode() != dev_node_name;
+				     });
+
+	if (metadata == entities.end()) {
+		LOG(UVC, Error) << "Could not find a metadata video device.";
+		metadata_ = NULL;
+		return -1;
+	}
+
+	/* configure the metadata node */
+	metadata_ = std::make_unique<V4L2VideoDevice>(*metadata);
+	ret = metadata_->open();
+	if (ret || !(metadata_->caps().isMeta())) {
+		/* if it fails to open or if the caps do in fact not have the metadata attribute (shouldn't happen) */
+		metadata_ = NULL;
+		return -1;
+	}
+	/* TODO: configure the buffer stream.  For now, just print. */
+	LOG(UVC, Info) << "metadata node has been opened at " << metadata_->deviceNode();
+	return 0;
+}
+
 int UVCCameraData::init(MediaDevice *media)
 {
 	int ret;
@@ -421,6 +454,7 @@ int UVCCameraData::init(MediaDevice *media)
 				   [](MediaEntity *e) {
 					   return e->flags() & MEDIA_ENT_FL_DEFAULT;
 				   });
+
 	if (entity == entities.end()) {
 		LOG(UVC, Error) << "Could not find a default video device";
 		return -ENODEV;
@@ -428,6 +462,7 @@ int UVCCameraData::init(MediaDevice *media)
 
 	/* Create and open the video device. */
 	video_ = std::make_unique<V4L2VideoDevice>(*entity);
+
 	ret = video_->open();
 	if (ret)
 		return ret;
@@ -512,6 +547,9 @@ int UVCCameraData::init(MediaDevice *media)
 
 	controlInfo_ = ControlInfoMap(std::move(ctrls), controls::controls);
 
+	ret = initMetadata(media);
+	/* TODO: handle a failure of the metadata opening, including arranging for the old
+	 * timestamping method to be used and for appropriate user warnings. */
 	return 0;
 }
 
