@@ -416,6 +416,7 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 int UVCCameraData::initMetadata(MediaDevice *media)
 {
 	int ret;
+	LOG(UVC, Gab) << "*** Initializing metadata.";
 
 	const std::vector<MediaEntity *> &entities = media->entities();
 	/* a metadata node has a valid deviceNode and is not the default node */
@@ -433,6 +434,10 @@ int UVCCameraData::initMetadata(MediaDevice *media)
 	/* configure the metadata node */
 	metadata_ = std::make_unique<V4L2VideoDevice>(*metadata);
 	ret = metadata_->open();
+	for (const auto &format : metadata_->formats()) {
+		LOG(UVC, Gab) << format.first.toString();
+	}
+
 	if (ret)
 		return ret;
 
@@ -443,6 +448,7 @@ int UVCCameraData::initMetadata(MediaDevice *media)
 		return -EINVAL;
 	}
 	// \todo: configure the buffer stream.  For now, just print.
+	LOG(UVC, Gab) << "metadata node has been opened at " << metadata_->deviceNode();
 	return 0;
 }
 
