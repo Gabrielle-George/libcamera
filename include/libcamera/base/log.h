@@ -24,6 +24,7 @@ enum LogSeverity {
 	LogWarning,
 	LogError,
 	LogFatal,
+	LogGab,
 };
 
 class LogCategory
