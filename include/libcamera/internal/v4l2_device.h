@@ -49,6 +49,9 @@ public:
 
 	void updateControlInfo();
 
+	int fd() const { return fd_.get(); }
+
+
 protected:
 	V4L2Device(const std::string &deviceNode);
 	~V4L2Device();
@@ -58,7 +61,6 @@ protected:
 
 	int ioctl(unsigned long request, void *argp);
 
-	int fd() const { return fd_.get(); }
 
 	template<typename T>
 	static std::optional<ColorSpace> toColorSpace(const T &v4l2Format,
