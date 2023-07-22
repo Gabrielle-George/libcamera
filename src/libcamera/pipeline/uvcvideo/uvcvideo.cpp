@@ -194,6 +194,8 @@ CameraConfiguration::Status UVCCameraConfiguration::validate()
 	metaformat.fourcc = V4L2PixelFormat(V4L2_META_FMT_UVC);
 	format.size = cfg.size;
 	//int ret = data_->metadata_->tryFormat(&metaformat);
+	LOG(UVC, Gab)
+			<< "Ret value of metadata try format: " << ret;
 	return status;
 }
 
@@ -259,6 +261,8 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 					   std::vector<std::unique_ptr<FrameBuffer>> *buffers)
 {
+	LOG(UVC, Gab) << "***Exporting frame buffers\n";
+
 	UVCCameraData *data = cameraData(camera);
 ;
 	unsigned int count = stream->configuration().bufferCount;
@@ -274,8 +278,11 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 					data->metadata_->fd(), buffer->planes()[0].offset);
 					///*buffer->planes()[0].fd.get()*/
 			
+			LOG(UVC, Gab) << "mmapped: "<<address << " for buffer: "<< reinterpret_cast<void *>(&buffer);
 
 			if (address == MAP_FAILED) {
+				LOG(UVC, Gab) << "Failed to mmap plane: -"
+							<< strerror(errno);
 				//todo: clean up all of the buffers.  We are not doing metadata anymore because
 				//we can't access the metadata
 			}
@@ -286,6 +293,7 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 			buffer->setCookie(i);
 		}
 	}else{
+		LOG(UVC, Gab) << "***Exporting frame buffers FAILED\n";
 
 	}
 
@@ -300,8 +308,11 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 					data->metadata_->fd(), buffer->planes()[0].offset);
 					///*buffer->planes()[0].fd.get()*/
 			
+			LOG(UVC, Gab) << "mmapped: "<<address << " for buffer: "<< reinterpret_cast<void *>(&buffer);
 
 			if (address == MAP_FAILED) {
+				LOG(UVC, Gab) << "Failed to mmap plane: -"
+							<< strerror(errno);
 				//todo: clean up all of the buffers.  We are not doing metadata anymore because
 				//we can't access the metadata
 			}
@@ -312,16 +323,21 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 			buffer->setCookie(i);
 		}
 	}else{
+		LOG(UVC, Gab) << "***Exporting frame buffers FAILED\n";
 
 	}
 
+	LOG(UVC, Gab) << "Result of exporting frame buffers: " << ret ;
 	return data->video_->exportBuffers(count, buffers);
 }
 
 int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList *controls)
 {
+	LOG(UVC,Gab) << "***Starting camera and metadata(TODO).";
+
 	UVCCameraData *data = cameraData(camera);
 	unsigned int count = data->stream_.configuration().bufferCount;
+	LOG(UVC, Gab) << "Importing frame buffers\n";
 
 	int ret = data->video_->importBuffers(count);
 	if (ret < 0)
@@ -477,6 +493,8 @@ int PipelineHandlerUVC::processControls(UVCCameraData *data, Request *request)
 
 int PipelineHandlerUVC::queueRequestDevice(Camera *camera, Request *request)
 {
+	LOG(UVC,Gab) << "***Queueing metadata request(TODO).";
+
 	UVCCameraData *data = cameraData(camera);
 	FrameBuffer *buffer = request->findBuffer(&data->stream_);
 	if (!buffer) {
@@ -499,6 +517,8 @@ int PipelineHandlerUVC::queueRequestDevice(Camera *camera, Request *request)
 
 bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 {
+	LOG(UVC,Gab) << "*** Matching UVC.";
+
 	MediaDevice *media;
 	DeviceMatch dm("uvcvideo");
 
@@ -526,6 +546,7 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 
 int UVCCameraData::initMetadata(MediaDevice *media){
 	int ret;
+	LOG(UVC,Gab) << "*** Initializing metadata.";
 
 	const std::vector<MediaEntity *> &entities = media->entities();
     /* a metadata node has a valid deviceNode and is not the default node */
@@ -544,6 +565,9 @@ int UVCCameraData::initMetadata(MediaDevice *media){
 	/* configure the metadata node */
 	metadata_ = std::make_unique<V4L2VideoDevice>(* metadata);
 	ret = metadata_->open();
+	for (const auto &format : metadata_->formats()) {
+		LOG(UVC, Gab)<< format.first.toString();
+	}
 
 	if (ret || !(metadata_->caps().isMeta())){
 		/* if it fails to open or if the caps do in fact not have the metadata attribute (shouldn't happen) */
@@ -551,6 +575,7 @@ int UVCCameraData::initMetadata(MediaDevice *media){
 		return -1;
 	}
 	//TODO: configure the buffer stream.  For now, just print.
+	LOG(UVC, Gab) << "metadata node has been opened at "<< metadata_->deviceNode();
 	return 0;
 }
 
@@ -849,6 +874,8 @@ void UVCCameraData::addControl(uint32_t cid, const ControlInfo &v4l2Info,
 
 void UVCCameraData::bufferReady(FrameBuffer *buffer)
 {
+	LOG(UVC,Gab) << "*** NORMAL BUFFER AVAILABLE! " << buffer->metadata().timestamp;
+
 	Request *request = buffer->request();
 
 	/* \todo Use the UVC metadata to calculate a more precise timestamp */
@@ -863,13 +890,22 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
 	int pos;
+	LOG(UVC,Gab) << "*** METADATA BUFFER AVAILABLE! " << buffer->metadata().timestamp;
 
 	pos = buffer->cookie();
+	LOG(UVC,Gab) << "position of buffer: " << pos;
+
+	LOG(UVC, Gab) << "ts: " << mappedMetaAddresses_[pos]->ts;
+	LOG(UVC, Gab) << "sof: " << mappedMetaAddresses_[pos]->sof;
+
+	LOG(UVC, Gab) << "buffer timestamp: " << mappedMetaAddresses_[pos]->ts;
+	LOG(UVC, Gab) << "    md timestamp: " << buffer->metadata().timestamp;
 	//todo: check the buffer state to make sure it's valid.
 
 	// if (!isStopped){
 	//int ret = metadata_->queueBuffer(buffer);
 
+	 //	LOG(UVC, Gab) << "ret: " << ret;
 	// }
 	//todo: unmap only in cleanupS
 	//munmap(address,buffer->planes()[0].length);

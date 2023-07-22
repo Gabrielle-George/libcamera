@@ -868,6 +868,8 @@ int V4L2VideoDevice::setFormat(V4L2DeviceFormat *format)
 
 int V4L2VideoDevice::getFormatMeta(V4L2DeviceFormat *format)
 {
+	LOG(V4L2, Gab) << "Getting format metadat!: ";
+
 	struct v4l2_format v4l2Format = {};
 	struct v4l2_meta_format *pix = &v4l2Format.fmt.meta;
 	int ret;
@@ -885,12 +887,15 @@ int V4L2VideoDevice::getFormatMeta(V4L2DeviceFormat *format)
 	format->planesCount = 1;
 	format->planes[0].bpl = pix->buffersize;
 	format->planes[0].size = pix->buffersize;
+	LOG(V4L2, Gab) << format->toString();
 
 	return 0;
 }
 
 int V4L2VideoDevice::trySetFormatMeta(V4L2DeviceFormat *format, bool set)
 {
+	LOG(V4L2, Gab) << "Trying set format!: ";
+
 	struct v4l2_format v4l2Format = {};
 	struct v4l2_meta_format *pix = &v4l2Format.fmt.meta;
 	int ret;
@@ -1235,11 +1240,14 @@ int V4L2VideoDevice::setSelection(unsigned int target, Rectangle *rect)
 int V4L2VideoDevice::requestBuffers(unsigned int count,
 				    enum v4l2_memory memoryType)
 {
+	LOG(V4L2, Gab) << "Requesting " << count << " buffers of mem type " << memoryType;
 	struct v4l2_requestbuffers rb = {};
 	int ret;
 
 	rb.count = count;
 	rb.type = bufferType_;
+	LOG(V4L2, Gab) << "Type: " << rb.type;
+
 	rb.memory = memoryType;
 
 	ret = ioctl(VIDIOC_REQBUFS, &rb);
@@ -1342,11 +1350,15 @@ int V4L2VideoDevice::allocateBuffers(unsigned int count,
 int V4L2VideoDevice::exportBuffers(unsigned int count,
 				   std::vector<std::unique_ptr<FrameBuffer>> *buffers)
 {
+	LOG(V4L2, Gab) << "Prepared to export " << count << " buffers";
 	int ret = createBuffers(count, buffers);
+
 	if (ret < 0)
 		return ret;
 
 	requestBuffers(0, V4L2_MEMORY_MMAP);
+
+	LOG(V4L2, Gab) << "Finished exporting " << count << " buffers";
 
 	return ret;
 }
@@ -1395,6 +1407,7 @@ int mmapBuffer(size_t length, int fd, off_t offset)
 		return -1;
 	}
 
+	LOG(V4L2, Gab) << "mapped buffer succeeded and gave map of " << mapped_ptr;
 
 	return 0;
 }
@@ -1408,6 +1421,7 @@ std::unique_ptr<FrameBuffer> V4L2VideoDevice::createBuffer(unsigned int index)
 	buf.type = bufferType_;
 	buf.length = std::size(v4l2Planes);
 	buf.m.planes = v4l2Planes;
+	LOG(V4L2, Gab) << "About to query buffer: index =" << index << "type = " << buf.type << "length = " << buf.length;
 
 	int ret = ioctl(VIDIOC_QUERYBUF, &buf);
 	if (ret < 0) {
@@ -1416,6 +1430,8 @@ std::unique_ptr<FrameBuffer> V4L2VideoDevice::createBuffer(unsigned int index)
 			<< strerror(-ret);
 		return nullptr;
 	}
+
+	LOG(V4L2, Gab) << "Memory type: " << buf.memory;
 
 	const bool multiPlanar = V4L2_TYPE_IS_MULTIPLANAR(buf.type);
 	const unsigned int numPlanes = multiPlanar ? buf.length : 1;
@@ -1429,6 +1445,7 @@ std::unique_ptr<FrameBuffer> V4L2VideoDevice::createBuffer(unsigned int index)
 	for (unsigned int nplane = 0; nplane < numPlanes; nplane++) {
 		UniqueFD filedsc = exportDmabufFd(buf.index, nplane);
 		// if (!filedsc.isValid()) {
+		// 	LOG(V4L2, Gab) << "buf length = " << buf.length << ", offset = " << buf.m.offset;
 		// 	//try using mmap and then mapping this to a fd
 		// 	filedsc = mmapBuffer(buf.length, fd(), buf.m.offset);
 		// 	//return nullptr;
@@ -1534,6 +1551,8 @@ UniqueFD V4L2VideoDevice::exportDmabufFd(unsigned int index,
  */
 int V4L2VideoDevice::importBuffers(unsigned int count)
 {
+	LOG(V4L2, Gab) << "Prepared to import " << count << " buffers";
+
 	if (cache_) {
 		LOG(V4L2, Error) << "Buffers already allocated";
 		return -EINVAL;
@@ -1548,6 +1567,7 @@ int V4L2VideoDevice::importBuffers(unsigned int count)
 	cache_ = new V4L2BufferCache(count);
 
 	LOG(V4L2, Debug) << "Prepared to import " << count << " buffers";
+	LOG(V4L2, Gab) << "Finished importing " << count << " buffers";
 
 	return 0;
 }
