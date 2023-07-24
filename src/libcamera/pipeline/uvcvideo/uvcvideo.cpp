@@ -35,9 +35,13 @@ namespace libcamera {
 
 LOG_DEFINE_CATEGORY(UVC)
 
+/* \todo Turn this into a class with convenience functions
+ */
 struct UVC_Block {
+	/* UVCH driver-supplied information*/
 	__u64	 ts;
 	__u16 sof;
+    /* Device-supplied UVC payload header*/
 	__u8 length;
 	__u8 flags;
 	__u64 PTS; 
@@ -61,15 +65,14 @@ public:
 	void bufferReady(FrameBuffer *buffer);
 	void bufferReadyMetadata(FrameBuffer *buffer);
 
-
 	const std::string &id() const { return id_; }
 
 	std::unique_ptr<V4L2VideoDevice> video_;
 	std::unique_ptr<V4L2VideoDevice> metadata_;
 	Stream stream_;
-	Stream metadataStream_;
 	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
 	std::vector<unique_mapped_ptr> mappedMetaAddresses_;
+	bool useMetadataStream;
 
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 	bool isStopped;
@@ -98,7 +101,6 @@ public:
 
 	std::unique_ptr<CameraConfiguration> generateConfiguration(Camera *camera,
 								   Span<const StreamRole> roles) override;
-	int configureMetaData(Camera *camera);
 	int configure(Camera *camera, CameraConfiguration *config) override;
 
 	int exportFrameBuffers(Camera *camera, Stream *stream,
@@ -193,10 +195,6 @@ CameraConfiguration::Status UVCCameraConfiguration::validate()
 		status = Adjusted;
 	}
 
-	V4L2DeviceFormat metaformat;
-	metaformat.fourcc = V4L2PixelFormat(V4L2_META_FMT_UVC);
-	format.size = cfg.size;
-	//int ret = data_->metadata_->tryFormat(&metaformat);
 	return status;
 }
 
@@ -251,15 +249,17 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 		return -EINVAL;
 
 	cfg.setStream(&data->stream_);
-	
-	//cfg.setStream(&data->stream_);
-
-	//configureMetaData(camera); //DON'T NEED???
-
 	return 0;
 }
 
-
+/* Exports frame buffers for video stream, and initializes
+ * and allocated the frame buffers for the metadata stream.
+ *
+ * UVC Metadata stream does not support exporting buffers via EXPBUF,
+ * so it is necessary to create and store mmap-ed addresses. 
+ * Metadata buffers are internal to libcamera. They are not, and 
+ * cannot be, exposed to the user.
+ */
 int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 					   std::vector<std::unique_ptr<FrameBuffer>> *buffers)
 {
@@ -268,7 +268,6 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 
 	int ret = data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
 	if (ret==(int) count){
-
 		for (unsigned int i = 0; i < count; i++){
 			std::unique_ptr<FrameBuffer> &buffer = data->metadataBuffers_[i];
 			void * address = mmap(NULL, buffer->planes()[0].length,
@@ -277,10 +276,9 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 					data->metadata_->fd(), buffer->planes()[0].offset);
 
 			if (address == MAP_FAILED) {
-				LOG(UVC, Error) << "Failed to mmap plane: -"
+				LOG(UVC, Error) << "Failed to mmap UVC metadata plane: -"
 							<< strerror(errno);
-				//todo: clean up all of the buffers.  We are not doing metadata anymore because
-				//we can't access the metadata
+				data->useMetadataStream = false;
 			}
 
 			data->mappedMetaAddresses_.emplace_back(
@@ -290,11 +288,11 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 							munmap(p, sizeof(UVC_Block));
 						})
 				);
-
 			buffer->setCookie(i);
 		}
 	}else{
-		LOG(UVC, Gab) << "***Exporting frame buffers FAILED\n";
+		LOG(UVC, Error) << "Unable to allocate buffers for UVC metadata stream.";
+		data->useMetadataStream = false;
 	}
 
 	return data->video_->exportBuffers(count, buffers);
@@ -316,21 +314,17 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 		return ret;
 	}
 
-		//metadata
-	 //ret = data->metadata_->importBuffers(count);
-
-	ret = data->metadata_->streamOn();
-	//	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
-
-	 	for (std::unique_ptr<FrameBuffer> &buf : data->metadataBuffers_){
-		ret = data->metadata_->queueBuffer(buf.get());
-		if (ret < 0)
+	if (data->useMetadataStream){
+		ret = data->metadata_->streamOn();
+		for (std::unique_ptr<FrameBuffer> &buf : data->metadataBuffers_){
+			ret = data->metadata_->queueBuffer(buf.get());
+			if (ret < 0)
+				return ret;
+		}
+		if (ret < 0) {
+			data->metadata_->releaseBuffers();
 			return ret;
-
-	}
-	if (ret < 0) {
-		//data->metadata_->releaseBuffers();
-		return ret;
+		}
 	}
 
 	return 0;
@@ -346,8 +340,10 @@ void PipelineHandlerUVC::stopDevice(Camera *camera)
 	data->video_->releaseBuffers();
 
 	data->isStopped = true;
-	data->metadata_->streamOff();
-	data->metadata_->releaseBuffers();
+	if (data->useMetadataStream){
+		data->metadata_->streamOff();
+		data->metadata_->releaseBuffers();
+	}
 }
 
 int PipelineHandlerUVC::processControl(ControlList *controls, unsigned int id,
@@ -490,7 +486,7 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 
 	/* Create and register the camera. */
 	std::string id = data->id();
-	std::set<Stream *> streams{ &data->stream_ , &data->metadataStream_};
+	std::set<Stream *> streams{ &data->stream_};
 	std::shared_ptr<Camera> camera =
 		Camera::create(std::move(data), id, streams);
 	registerCamera(std::move(camera));
@@ -504,8 +500,9 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 int UVCCameraData::initMetadata(MediaDevice *media)
 {
 	int ret;
+
 	const std::vector<MediaEntity *> &entities = media->entities();
-	/* a metadata node has a valid deviceNode and is not the default node */
+
 	std::string dev_node_name = video_->deviceNode();
 	auto metadata = std::find_if(entities.begin(), entities.end(),
 				     [&dev_node_name](MediaEntity *e) {
@@ -533,7 +530,7 @@ int UVCCameraData::initMetadata(MediaDevice *media)
 		metadata_ = NULL;
 		return -EINVAL;
 	}
-	// \todo: configure the buffer stream.  For now, just print.
+
 	LOG(UVC, Gab) << "metadata node has been opened at " << metadata_->deviceNode();
 	return 0;
 }
@@ -642,7 +639,12 @@ int UVCCameraData::init(MediaDevice *media)
 	controlInfo_ = ControlInfoMap(std::move(ctrls), controls::controls);
 
 	ret = initMetadata(media);
-    metadata_->bufferReady.connect(this, &UVCCameraData::bufferReadyMetadata);
+	if (!ret){
+    	metadata_->bufferReady.connect(this, &UVCCameraData::bufferReadyMetadata);
+		useMetadataStream = true;
+	}else{
+		useMetadataStream = false;
+	}
 
 	/* \todo: handle a failure of the metadata opening, including arranging for the old
 	 * timestamping method to be used and for appropriate user warnings. */
@@ -848,7 +850,7 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
 	int pos;
-	/* \todo: Use the data in the metadata buffer to get a more accurate
+	/* \todo: Use the data in the metadata buffer to get a more
 	* accurate timestamp. For now, just print the buffer data's timestamp 
 	* which was given by the driver, and also the timestamp given 
 	* as part of this buffer's metadata.
