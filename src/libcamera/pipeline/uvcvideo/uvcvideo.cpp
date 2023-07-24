@@ -43,6 +43,8 @@ struct UVC_Block {
 	__u8 buf[15]; //TODO: change me!;
 };
 
+using unique_mapped_ptr = std::unique_ptr<UVC_Block, void(*)(UVC_Block*)>;
+
 class UVCCameraData : public Camera::Private
 {
 public:
@@ -66,7 +68,7 @@ public:
 	Stream stream_;
 	Stream metadataStream_;
 	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
-	std::vector<std::unique_ptr<UVC_Block>> mappedMetaAddresses_;
+	std::vector<unique_mapped_ptr> mappedMetaAddresses_;
 
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 	bool isStopped;
@@ -256,11 +258,11 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 	return 0;
 }
 
+
 int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 					   std::vector<std::unique_ptr<FrameBuffer>> *buffers)
 {
 	UVCCameraData *data = cameraData(camera);
-;
 	unsigned int count = stream->configuration().bufferCount;
 
 	int ret = data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
@@ -270,49 +272,28 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 			std::unique_ptr<FrameBuffer> &buffer = data->metadataBuffers_[i];
 			void * address = mmap(NULL, buffer->planes()[0].length,
 					PROT_READ | PROT_WRITE, 
-					MAP_SHARED,             
+					MAP_PRIVATE | MAP_ANONYMOUS,             
 					data->metadata_->fd(), buffer->planes()[0].offset);
-					///*buffer->planes()[0].fd.get()*/
-			
 
 			if (address == MAP_FAILED) {
+				LOG(UVC, Error) << "Failed to mmap plane: -"
+							<< strerror(errno);
 				//todo: clean up all of the buffers.  We are not doing metadata anymore because
 				//we can't access the metadata
 			}
 
-			UVC_Block * dataBlock = static_cast<UVC_Block *>(address);
-			std::unique_ptr<UVC_Block> dataBlockPtr = std::unique_ptr<UVC_Block>{dataBlock};
-			data->mappedMetaAddresses_.push_back(std::move(dataBlockPtr));
+			data->mappedMetaAddresses_.emplace_back(
+				unique_mapped_ptr(new (address) UVC_Block,
+						[](UVC_Block *p) {
+							p->~UVC_Block();
+							munmap(p, sizeof(UVC_Block));
+						})
+				);
+
 			buffer->setCookie(i);
 		}
 	}else{
-
-	}
-
-	ret = data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
-	if (ret==(int) count){
-
-		for (unsigned int i = 0; i < count; i++){
-			std::unique_ptr<FrameBuffer> &buffer = data->metadataBuffers_[i];
-			void * address = mmap(NULL, buffer->planes()[0].length,
-					PROT_READ | PROT_WRITE, 
-					MAP_SHARED,             
-					data->metadata_->fd(), buffer->planes()[0].offset);
-					///*buffer->planes()[0].fd.get()*/
-			
-
-			if (address == MAP_FAILED) {
-				//todo: clean up all of the buffers.  We are not doing metadata anymore because
-				//we can't access the metadata
-			}
-
-			UVC_Block * dataBlock = static_cast<UVC_Block *>(address);
-			std::unique_ptr<UVC_Block> dataBlockPtr = std::unique_ptr<UVC_Block>{dataBlock};
-			data->mappedMetaAddresses_.push_back(std::move(dataBlockPtr));
-			buffer->setCookie(i);
-		}
-	}else{
-
+		LOG(UVC, Gab) << "***Exporting frame buffers FAILED\n";
 	}
 
 	return data->video_->exportBuffers(count, buffers);
@@ -875,12 +856,20 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	int pos;
 
 	pos = buffer->cookie();
+	LOG(UVC,Gab) << "position of buffer: " << pos;
+
+	LOG(UVC, Gab) << "length: " << mappedMetaAddresses_[pos]->flags;
+	LOG(UVC, Gab) << "sof: " << mappedMetaAddresses_[pos]->sof;
+	LOG(UVC, Gab) << "flags: " << mappedMetaAddresses_[pos]->flags;
+
+	LOG(UVC, Gab) << "buffer timestamp: " << mappedMetaAddresses_[pos]->ts;
+	LOG(UVC, Gab) << "    md timestamp: " << buffer->metadata().timestamp;
 	//todo: check the buffer state to make sure it's valid.
 
-	// if (!isStopped){
-	//int ret = metadata_->queueBuffer(buffer);
-
-	// }
+	if (!isStopped){
+		int ret = metadata_->queueBuffer(buffer);
+		LOG(UVC, Gab) << "ret: " << ret;
+	}
 	//todo: unmap only in cleanupS
 	//munmap(address,buffer->planes()[0].length);
 
