@@ -40,7 +40,8 @@ struct UVC_Block {
 	__u16 sof;
 	__u8 length;
 	__u8 flags;
-	__u8 buf[15]; //TODO: change me!;
+	__u64 PTS; 
+	__u8 SCR[6];
 };
 
 using unique_mapped_ptr = std::unique_ptr<UVC_Block, void(*)(UVC_Block*)>;
@@ -272,7 +273,7 @@ int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
 			std::unique_ptr<FrameBuffer> &buffer = data->metadataBuffers_[i];
 			void * address = mmap(NULL, buffer->planes()[0].length,
 					PROT_READ | PROT_WRITE, 
-					MAP_PRIVATE | MAP_ANONYMOUS,             
+					MAP_SHARED,             
 					data->metadata_->fd(), buffer->planes()[0].offset);
 
 			if (address == MAP_FAILED) {
@@ -341,17 +342,12 @@ void PipelineHandlerUVC::stopDevice(Camera *camera)
 	//unsigned int i;
 	UVCCameraData *data = cameraData(camera);
 
-			data->isStopped = true;
-
 	data->video_->streamOff();
 	data->video_->releaseBuffers();
 
+	data->isStopped = true;
 	data->metadata_->streamOff();
-	// for (i = 0; i < data->mappedMetaAddresses_.size(); i++){
-	// 	munmap(data->mappedMetaAddresses_[i].get(),data->metadataBuffers_[i]->planes()[0].length);
-	// }
-
-	// data->isStopped = true;
+	data->metadata_->releaseBuffers();
 }
 
 int PipelineHandlerUVC::processControl(ControlList *controls, unsigned int id,
@@ -508,8 +504,6 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 int UVCCameraData::initMetadata(MediaDevice *media)
 {
 	int ret;
-	LOG(UVC, Gab) << "*** Initializing metadata.";
-
 	const std::vector<MediaEntity *> &entities = media->entities();
 	/* a metadata node has a valid deviceNode and is not the default node */
 	std::string dev_node_name = video_->deviceNode();
@@ -854,39 +848,24 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
 	int pos;
-
+	/* \todo: Use the data in the metadata buffer to get a more accurate
+	* accurate timestamp. For now, just print the buffer data's timestamp 
+	* which was given by the driver, and also the timestamp given 
+	* as part of this buffer's metadata.
+	*/
 	pos = buffer->cookie();
-	LOG(UVC,Gab) << "position of buffer: " << pos;
-
-	LOG(UVC, Gab) << "length: " << mappedMetaAddresses_[pos]->flags;
-	LOG(UVC, Gab) << "sof: " << mappedMetaAddresses_[pos]->sof;
-	LOG(UVC, Gab) << "flags: " << mappedMetaAddresses_[pos]->flags;
-
-	LOG(UVC, Gab) << "buffer timestamp: " << mappedMetaAddresses_[pos]->ts;
-	LOG(UVC, Gab) << "    md timestamp: " << buffer->metadata().timestamp;
-	//todo: check the buffer state to make sure it's valid.
+	LOG(UVC, Debug) << "UVC Extended field's driver timestamp: " 
+				    << mappedMetaAddresses_[pos]->ts;
+	LOG(UVC, Debug) << "UVC Extended field's buffer metadata timestamp: " 
+	                << buffer->metadata().timestamp;
 
 	if (!isStopped){
 		int ret = metadata_->queueBuffer(buffer);
 		LOG(UVC, Gab) << "ret: " << ret;
 	}
-	//todo: unmap only in cleanupS
-	//munmap(address,buffer->planes()[0].length);
-
-	// Request *request = buffer->request(); //this is invalid!
-	//solution: set up a queue to store the request so we can have
-	//access from within here
-
-	// /* \todo Use the UVC metadata to calculate a more precise timestamp */
-	// request->metadata().set(controls::SensorTimestamp,
-	// 			buffer->metadata().timestamp);
-
-
-//todo: NEED TO DO THIS
-//need to complete the request when both metadata 
-//and image data frame comes in
-	 //pipe()->completeBuffer(request, buffer);
-	//pipe()->completeRequest(request);
+	/* \todo: Complete the request if both metadata
+	 * and image data frame have come in
+	 */
 }
 
 REGISTER_PIPELINE_HANDLER(PipelineHandlerUVC)
