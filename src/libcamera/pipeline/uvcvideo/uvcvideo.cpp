@@ -39,16 +39,16 @@ LOG_DEFINE_CATEGORY(UVC)
  */
 struct UVC_Block {
 	/* UVCH driver-supplied information*/
-	__u64	 ts;
+	__u64 ts;
 	__u16 sof;
-    /* Device-supplied UVC payload header*/
+	/* Device-supplied UVC payload header*/
 	__u8 length;
 	__u8 flags;
-	__u64 PTS; 
+	__u64 PTS;
 	__u8 SCR[6];
 };
 
-using unique_mapped_ptr = std::unique_ptr<UVC_Block, void(*)(UVC_Block*)>;
+using unique_mapped_ptr = std::unique_ptr<UVC_Block, void (*)(UVC_Block *)>;
 
 class UVCCameraData : public Camera::Private
 {
@@ -256,8 +256,8 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
  * and allocated the frame buffers for the metadata stream.
  *
  * UVC Metadata stream does not support exporting buffers via EXPBUF,
- * so it is necessary to create and store mmap-ed addresses. 
- * Metadata buffers are internal to libcamera. They are not, and 
+ * so it is necessary to create and store mmap-ed addresses.
+ * Metadata buffers are internal to libcamera. They are not, and
  * cannot be, exposed to the user.
  */
 int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
@@ -314,9 +314,9 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 		return ret;
 	}
 
-	if (data->useMetadataStream){
+	if (data->useMetadataStream) {
 		ret = data->metadata_->streamOn();
-		for (std::unique_ptr<FrameBuffer> &buf : data->metadataBuffers_){
+		for (std::unique_ptr<FrameBuffer> &buf : data->metadataBuffers_) {
 			ret = data->metadata_->queueBuffer(buf.get());
 			if (ret < 0)
 				return ret;
@@ -340,7 +340,7 @@ void PipelineHandlerUVC::stopDevice(Camera *camera)
 	data->video_->releaseBuffers();
 
 	data->isStopped = true;
-	if (data->useMetadataStream){
+	if (data->useMetadataStream) {
 		data->metadata_->streamOff();
 		data->metadata_->releaseBuffers();
 	}
@@ -480,13 +480,13 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 		return false;
 
 	std::unique_ptr<UVCCameraData> data = std::make_unique<UVCCameraData>(this);
-	
+
 	if (data->init(media))
-		return false;	
+		return false;
 
 	/* Create and register the camera. */
 	std::string id = data->id();
-	std::set<Stream *> streams{ &data->stream_};
+	std::set<Stream *> streams{ &data->stream_ };
 	std::shared_ptr<Camera> camera =
 		Camera::create(std::move(data), id, streams);
 	registerCamera(std::move(camera));
@@ -639,10 +639,10 @@ int UVCCameraData::init(MediaDevice *media)
 	controlInfo_ = ControlInfoMap(std::move(ctrls), controls::controls);
 
 	ret = initMetadata(media);
-	if (!ret){
-    	metadata_->bufferReady.connect(this, &UVCCameraData::bufferReadyMetadata);
+	if (!ret) {
+		metadata_->bufferReady.connect(this, &UVCCameraData::bufferReadyMetadata);
 		useMetadataStream = true;
-	}else{
+	} else {
 		useMetadataStream = false;
 	}
 
