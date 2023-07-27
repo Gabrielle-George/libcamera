@@ -76,6 +76,8 @@ public:
 
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 	bool isStopped;
+	std::queue<std::pair<Request *, FrameBuffer *>> waitingForVideoBuffer_;
+	std::queue<std::pair<unsigned int, unsigned int>> waitingForMDBuffer_; //first is sequence, second is ts
 
 private:
 	bool generateId();
@@ -563,7 +565,6 @@ int UVCCameraData::initMetadata(MediaDevice *media)
 		return -EINVAL;
 	}
 
-	LOG(UVC, Gab) << "metadata node has been opened at " << metadata_->deviceNode();
 	return 0;
 }
 
@@ -870,6 +871,15 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 {
 	Request *request = buffer->request();
 
+	if (std::get<0>(waitingForMDBuffer_.front())== buffer->metadata().sequence){
+		LOG(UVC,Gab) <<"*****MATCH!!!!!! Seq: " << buffer->metadata().sequence 
+		<< ", ts: " << std::get<1>(waitingForMDBuffer_.front());
+		waitingForMDBuffer_.pop();
+	}else{
+		LOG(UVC,Gab) <<"no macth vid: " << buffer->metadata().sequence << "top seq is: "<<std::get<0>(waitingForMDBuffer_.front());
+
+	}
+
 	/* \todo Use the UVC metadata to calculate a more precise timestamp */
 	request->metadata().set(controls::SensorTimestamp,
 				buffer->metadata().timestamp);
@@ -888,8 +898,10 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	* which was given by the driver, and also the timestamp given
 	* as part of this buffer's metadata.
 	*/
-
 	pos = buffer->cookie();
+	waitingForMDBuffer_.push(std::make_pair(buffer->metadata().sequence, mappedMetaAddresses_[pos]->ts));
+	LOG(UVC,Gab) <<"no macth md: " << buffer->metadata().sequence << "queue top is: " << std::get<0>(waitingForMDBuffer_.front());
+
 	LOG(UVC, Gab) << "UVC Extended field's data content (our) timestamp: "
 		      << mappedMetaAddresses_[pos]->ts;
 	LOG(UVC, Gab) << "UVC Extended field's V4L2 timestamp: "
