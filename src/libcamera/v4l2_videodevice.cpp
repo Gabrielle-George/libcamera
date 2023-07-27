@@ -1427,24 +1427,26 @@ std::unique_ptr<FrameBuffer> V4L2VideoDevice::createBuffer(unsigned int index)
 
 	std::vector<FrameBuffer::Plane> planes;
 	for (unsigned int nplane = 0; nplane < numPlanes; nplane++) {
-		UniqueFD filedsc = exportDmabufFd(buf.index, nplane);
-		// if (!filedsc.isValid()) {
-		// 	//try using mmap and then mapping this to a fd
-		// 	filedsc = mmapBuffer(buf.length, fd(), buf.m.offset);
-		// 	//return nullptr;
-		// }
-		// if (!filedsc.isValid()) {
-		// 	return nullptr;
-		// }
-
 		FrameBuffer::Plane plane;
-		plane.fd = SharedFD(std::move(filedsc));
-		/*
-		 * V4L2 API doesn't provide dmabuf offset information of plane.
-		 * Set 0 as a placeholder offset.
-		 * \todo Set the right offset once V4L2 API provides a way.
-		 */
-		plane.offset = 0;
+
+		if (buf.type != V4L2_BUF_TYPE_META_CAPTURE) {
+			UniqueFD fd = exportDmabufFd(buf.index, nplane);
+			if (!fd.isValid())
+				return nullptr;
+			plane.fd = SharedFD(std::move(fd));
+
+			/*
+			* V4L2 API doesn't provide dmabuf offset information of plane.
+			* Set 0 as a placeholder offset.
+			* \todo Set the right offset once V4L2 API provides a way.
+			*/
+			plane.offset = 0;
+		} else {
+			/* Dmabuf fd is not exported for metadata, so store
+			 * the offset from the querybuf call.
+			 */
+			plane.offset = buf.m.offset;
+		}
 		plane.length = multiPlanar ? buf.m.planes[nplane].length : buf.length;
 
 		planes.push_back(std::move(plane));
@@ -1465,6 +1467,7 @@ std::unique_ptr<FrameBuffer> V4L2VideoDevice::createBuffer(unsigned int index)
 		 * has more than one plane.
 		 */
 		ASSERT(numPlanes == 1u);
+		LOG(V4L2, Gab) << "Assign offset!";
 
 		planes.resize(formatInfo_->numPlanes());
 		const SharedFD &fd = planes[0].fd;
@@ -1481,6 +1484,8 @@ std::unique_ptr<FrameBuffer> V4L2VideoDevice::createBuffer(unsigned int index)
 			unsigned int stride = format_.planes[0].bpl * formatInfo_->planes[i].bytesPerGroup / formatInfo_->planes[0].bytesPerGroup;
 
 			plane.fd = fd;
+			LOG(V4L2, Gab) << "Setting offset:" << offset;
+
 			plane.offset = offset;
 			plane.length = formatInfo_->planeSize(format_.size.height,
 							      i, stride);
