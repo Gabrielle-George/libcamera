@@ -304,6 +304,7 @@ int PipelineHandlerUVC::createMetadataBuffers(Camera *camera, unsigned int count
 			LOG(UVC, Error) << "Failed to mmap UVC metadata plane: -"
 					<< strerror(errno);
 			cleanupMetadataBuffers(camera);
+			return -ENOMEM;
 		}
 
 		//\todo: handle multiple calls to this function better
@@ -880,7 +881,7 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
 	int pos;
-	if (buffer->metadata().status != FrameMetadata::Status::FrameSuccess)
+	if (!useMetadataStream || buffer->metadata().status != FrameMetadata::Status::FrameSuccess)
 		return;
 	/* \todo: Use the data in the metadata buffer to get a more
 	* accurate timestamp. For now, just print the buffer data's timestamp
