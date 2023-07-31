@@ -80,7 +80,6 @@ public:
 	std::queue<std::pair<unsigned int, uint64_t>> waitingForMDBuffer_; //first is sequence, second is ts
 private:
 	bool generateId();
-
 	std::string id_;
 };
 
@@ -122,8 +121,6 @@ private:
 	int createMetadataBuffers(Camera *camera, unsigned int count);
 	int cleanupMetadataBuffers(Camera *camera);
 	int cleanup(Camera *camera);
-	Timer watchdog_; //end the request if we aren't getting metadata buffers
-	utils::Duration watchdogDuration_;
 
 	UVCCameraData *cameraData(Camera *camera)
 	{
@@ -870,22 +867,39 @@ void UVCCameraData::addControl(uint32_t cid, const ControlInfo &v4l2Info,
 	ctrls->emplace(id, info);
 }
 
+// void UVCCameraData::setMetadataTimeout(utils::Duration timeout)
+// {
+// 	watchdogDuration_ = timeout;
+
+// 	watchdog_.stop();
+// 	if (watchdogDuration_ && state_ == State::Streaming && !queuedBuffers_.empty())
+// 		watchdog_.start(std::chrono::duration_cast<std::chrono::milliseconds>(timeout));
+// }
+uint64_t prev = 0;
+uint64_t prev_reported = 0;
+
 void UVCCameraData::bufferReady(FrameBuffer *buffer)
 {
-	LOG(UVC,Gab) <<"*****VID BUFFER READY: seq " << buffer->metadata().sequence;
+	//LOG(UVC,Gab) <<"*****VID BUFFER READY: seq = " << buffer->metadata().sequence <<", time = "<< buffer->metadata().timestamp;
+	LOG(UVC, Gab) << "Diff between current and last (vid): " << buffer->metadata().timestamp - prev;
+	prev = buffer->metadata().timestamp;
 
 	Request *request = buffer->request();
 
-	if (!waitingForMDBuffer_.empty() && (std::get<0>(waitingForMDBuffer_.front())+1) ==buffer->metadata().sequence){
-		LOG(UVC,Gab) <<"vid matched with md: seq: " << buffer->metadata().sequence;
+	if (!waitingForMDBuffer_.empty() && (std::get<0>(waitingForMDBuffer_.front()) + 1) == buffer->metadata().sequence) {
 		request->metadata().set(controls::SensorTimestamp,
-		std::get<1>(waitingForMDBuffer_.front()));
-		LOG(UVC, Gab) << "**ts: " << std::get<1>(waitingForMDBuffer_.front())<< " vs " << buffer->metadata().timestamp;
+					std::get<1>(waitingForMDBuffer_.front()));
+		LOG(UVC, Gab) << "**got vd second, ts: " << std::get<1>(waitingForMDBuffer_.front()) << " vs " << buffer->metadata().timestamp;
+		LOG(UVC, Gab) << "Diff between current and last (reported): " << (uint64_t)request->metadata().get(controls::SensorTimestamp).value() - prev_reported;
+		prev_reported = (uint64_t)request->metadata().get(controls::SensorTimestamp).value();
+		LOG(UVC, Gab) << "Diff between vid and md: "
+			      << utils::abs_diff(prev_reported, prev);
+		;
 		pipe()->completeBuffer(request, buffer);
 		pipe()->completeRequest(request);
 		waitingForMDBuffer_.pop();
 		return;
-	}else{
+	} else {
 		//waitingForMDBuffer_.pop();
 		//waitingForMDBuffer_.pop();
 		waitingForVideoBuffer_.push(std::make_pair(request, buffer));
@@ -895,45 +909,38 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	request->metadata().set(controls::SensorTimestamp,
 				buffer->metadata().timestamp);
 
-	if (buffer->metadata().sequence == 0){
-		LOG(UVC, Gab) << "ts: " << buffer->metadata().timestamp;
-
+	if (buffer->metadata().sequence == 0) {
 		pipe()->completeBuffer(request, buffer);
 		pipe()->completeRequest(request);
 		waitingForVideoBuffer_.pop();
 	}
 
-	if (waitingForVideoBuffer_.size() > 3){
-		LOG(UVC, Gab) << "Error: Metadata buffers are not sending. Completing requests now.";
+	if (waitingForVideoBuffer_.size() > 2) {
+		//LOG(UVC, Gab) << "Error: Metadata buffers are not sending. Completing requests now.";
 
-		while (!waitingForVideoBuffer_.empty()){
+		while (!waitingForVideoBuffer_.empty()) {
 			Request *oldRequest = std::get<0>(waitingForVideoBuffer_.front());
 			FrameBuffer *oldBuffer = std::get<1>(waitingForVideoBuffer_.front());
-			LOG(UVC, Gab) << "**ts: " << buffer->metadata().timestamp;
-
+			oldRequest->metadata().set(controls::SensorTimestamp,
+						   oldBuffer->metadata().timestamp);
 			pipe()->completeBuffer(oldRequest, oldBuffer);
 			pipe()->completeRequest(oldRequest);
 			waitingForVideoBuffer_.pop();
 		}
 	}
-
-
 }
 int c = 0;
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
-
 	/* The metadata stream always starts at seq 1 and libcamera sets the start sequence to 0,
 	 * so it's necessary to add one to match this buffer with the correct
-	 * video frame buffer. 
+	 * video frame buffer.
 	 */
-	unsigned int seqNumber = buffer->metadata().sequence+1;
+	unsigned int seqNumber = buffer->metadata().sequence + 1;
 	int pos;
-	if (!useMetadataStream || buffer->metadata().status != FrameMetadata::Status::FrameSuccess){
-
+	if (!useMetadataStream || buffer->metadata().status != FrameMetadata::Status::FrameSuccess) {
 		return;
-	}	
-	LOG(UVC,Gab) <<"*****META BUFFER READY: seq " << buffer->metadata().sequence ;
+	}
 
 	/* \todo: Use the data in the metadata buffer to get a more
 	* accurate timestamp. For now, just print the buffer data's timestamp
@@ -953,24 +960,26 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 
 	//LOG(UVC, Gab) << utils::abs_diff(buffer->metadata().timestamp, mappedMetaAddresses_[pos]->ts);
 
+	//LOG(UVC,Gab) <<"*****META BUFFER READY: seq (given)= " << buffer->metadata().sequence << "seq (true)= "<<seqNumber << ", time = " << mappedMetaAddresses_[pos]->ts;
 
-	if (!waitingForVideoBuffer_.empty() && std::get<1>(waitingForVideoBuffer_.front())->metadata().sequence== seqNumber){
-		LOG(UVC, Gab) << "md matched with vid.";
+	if (!waitingForVideoBuffer_.empty() && std::get<1>(waitingForVideoBuffer_.front())->metadata().sequence == seqNumber) {
 		Request *request = std::get<0>(waitingForVideoBuffer_.front());
 		FrameBuffer *vidBuffer = std::get<1>(waitingForVideoBuffer_.front());
 		request->metadata().set(controls::SensorTimestamp,
-			mappedMetaAddresses_[pos]->ts);
-		LOG(UVC, Gab) << "**ts: " << mappedMetaAddresses_[pos]->ts << " vs " << vidBuffer->metadata().timestamp;
+					mappedMetaAddresses_[pos]->ts);
+		LOG(UVC, Gab) << "**got md second, ts: " << mappedMetaAddresses_[pos]->ts << " vs " << vidBuffer->metadata().timestamp;
+		LOG(UVC, Gab) << "Diff between current and last (reported): " << (uint64_t)request->metadata().get(controls::SensorTimestamp).value() - prev_reported;
+		prev_reported = (uint64_t)request->metadata().get(controls::SensorTimestamp).value();
 
+		LOG(UVC, Gab) << "Diff between vid and md: "
+			      << utils::abs_diff(mappedMetaAddresses_[pos]->ts, vidBuffer->metadata().timestamp);
+		;
 		pipe()->completeBuffer(request, vidBuffer);
 		pipe()->completeRequest(request);
 		waitingForVideoBuffer_.pop();
-		return;
+	} else {
+		waitingForMDBuffer_.push(std::make_pair(buffer->metadata().sequence, mappedMetaAddresses_[pos]->ts));
 	}
-
-	waitingForMDBuffer_.push(std::make_pair(buffer->metadata().sequence, mappedMetaAddresses_[pos]->ts));
-	LOG(UVC, Gab) << "pushing " <<  mappedMetaAddresses_[pos]->ts;
-
 	metadata_->queueBuffer(buffer);
 }
 
