@@ -607,13 +607,13 @@ int V4L2VideoDevice::open()
 	if (caps_.isVideoCapture()) {
 		notifierType = EventNotifier::Read;
 		bufferType_ = caps_.isMultiplanar()
-			    ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
-			    : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+				      ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+				      : V4L2_BUF_TYPE_VIDEO_CAPTURE;
 	} else if (caps_.isVideoOutput()) {
 		notifierType = EventNotifier::Write;
 		bufferType_ = caps_.isMultiplanar()
-			    ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
-			    : V4L2_BUF_TYPE_VIDEO_OUTPUT;
+				      ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+				      : V4L2_BUF_TYPE_VIDEO_OUTPUT;
 	} else if (caps_.isMetaCapture()) {
 		notifierType = EventNotifier::Read;
 		bufferType_ = V4L2_BUF_TYPE_META_CAPTURE;
@@ -700,14 +700,14 @@ int V4L2VideoDevice::open(SharedFD handle, enum v4l2_buf_type type)
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
 		notifierType = EventNotifier::Write;
 		bufferType_ = caps_.isMultiplanar()
-			    ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
-			    : V4L2_BUF_TYPE_VIDEO_OUTPUT;
+				      ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE
+				      : V4L2_BUF_TYPE_VIDEO_OUTPUT;
 		break;
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
 		notifierType = EventNotifier::Read;
 		bufferType_ = caps_.isMultiplanar()
-			    ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
-			    : V4L2_BUF_TYPE_VIDEO_CAPTURE;
+				      ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
+				      : V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		break;
 	default:
 		LOG(V4L2, Error) << "Unsupported buffer type";
@@ -793,7 +793,7 @@ void V4L2VideoDevice::close()
 std::string V4L2VideoDevice::logPrefix() const
 {
 	return deviceNode() + "[" + std::to_string(fd()) +
-		(V4L2_TYPE_IS_OUTPUT(bufferType_) ? ":out]" : ":cap]");
+	       (V4L2_TYPE_IS_OUTPUT(bufferType_) ? ":out]" : ":cap]");
 }
 
 /**
@@ -1402,18 +1402,28 @@ std::unique_ptr<FrameBuffer> V4L2VideoDevice::createBuffer(unsigned int index)
 
 	std::vector<FrameBuffer::Plane> planes;
 	for (unsigned int nplane = 0; nplane < numPlanes; nplane++) {
-		UniqueFD fd = exportDmabufFd(buf.index, nplane);
-		if (!fd.isValid())
-			return nullptr;
-
 		FrameBuffer::Plane plane;
-		plane.fd = SharedFD(std::move(fd));
-		/*
-		 * V4L2 API doesn't provide dmabuf offset information of plane.
-		 * Set 0 as a placeholder offset.
-		 * \todo Set the right offset once V4L2 API provides a way.
-		 */
-		plane.offset = 0;
+
+		if (buf.type != V4L2_BUF_TYPE_META_CAPTURE) {
+			UniqueFD fd = exportDmabufFd(buf.index, nplane);
+			if (!fd.isValid())
+				return nullptr;
+			plane.fd = SharedFD(std::move(fd));
+
+			/*
+			* V4L2 API doesn't provide dmabuf offset information of plane.
+			* Set 0 as a placeholder offset.
+			* \todo Set the right offset once V4L2 API provides a way.
+			*/
+			plane.offset = 0;
+		} else {
+			/* Dmabuf fd is not exported for metadata, so store
+			 * the offset from the querybuf call and this device's fd.
+			 */
+			SharedFD tmp(this->fd());
+			plane.fd = tmp;
+			plane.offset = buf.m.offset;
+		}
 		plane.length = multiPlanar ? buf.m.planes[nplane].length : buf.length;
 
 		planes.push_back(std::move(plane));
@@ -1802,11 +1812,10 @@ FrameBuffer *V4L2VideoDevice::dequeueBuffer()
 	FrameMetadata &metadata = buffer->_d()->metadata();
 
 	metadata.status = buf.flags & V4L2_BUF_FLAG_ERROR
-			? FrameMetadata::FrameError
-			: FrameMetadata::FrameSuccess;
+				  ? FrameMetadata::FrameError
+				  : FrameMetadata::FrameSuccess;
 	metadata.sequence = buf.sequence;
-	metadata.timestamp = buf.timestamp.tv_sec * 1000000000ULL
-			   + buf.timestamp.tv_usec * 1000ULL;
+	metadata.timestamp = buf.timestamp.tv_sec * 1000000000ULL + buf.timestamp.tv_usec * 1000ULL;
 
 	if (V4L2_TYPE_IS_OUTPUT(buf.type))
 		return buffer;
@@ -1850,7 +1859,7 @@ FrameBuffer *V4L2VideoDevice::dequeueBuffer()
 		 * API.
 		 */
 		unsigned int bytesused = multiPlanar ? planes[0].bytesused
-				       : buf.bytesused;
+						     : buf.bytesused;
 		unsigned int remaining = bytesused;
 
 		for (auto [i, plane] : utils::enumerate(buffer->planes())) {
