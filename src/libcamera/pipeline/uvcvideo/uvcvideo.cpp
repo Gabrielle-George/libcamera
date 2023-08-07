@@ -34,6 +34,8 @@ namespace libcamera {
 
 LOG_DEFINE_CATEGORY(UVC)
 
+
+
 struct UVC_Block {
 	/* UVCH driver-supplied information*/
 	uint64_t ts;
@@ -41,10 +43,23 @@ struct UVC_Block {
 	/* Device-supplied UVC payload header*/
 	__u8 length;
 	__u8 flags;
-	__u64 PTS;
-	__u8 SCR[6];
+	__u32 PTS;
+	__u32 STC;
+	__u16 SOF;
 };
 
+void printUVCMD(UVC_Block &block){
+	LOG(UVC, Gab) << "UVC: \n" <<
+	"v4l2 ts: " << block.ts << "\n" <<
+	"sof: " << block.sof <<"\n" <<
+	"length: " << static_cast<int>(block.length) <<"\n" <<
+	"flags: " << "0x" << std::hex << static_cast<int>(block.flags) 
+		<< std::dec <<"\n" <<
+	"PTS: " << block.PTS <<"\n" <<
+	"STC: "<< block.STC <<"\n" <<
+	"SOF: " << "0x" << std::setfill('0') << std::setw(4) << 
+		std::right << std::hex << block.SOF;
+}
 using unique_mapped_ptr = std::unique_ptr<UVC_Block, void (*)(UVC_Block *)>;
 
 class UVCCameraData : public Camera::Private
@@ -901,11 +916,11 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 			unsigned int mdSequence =
 				std::get<0>(waitingForMDBuffer_.front()) + frameStart_;
 			if (mdSequence == buffer->metadata().sequence) {
-				/* \todo: DNI: This is just to prove it is working.*/
-				LOG(UVC, Debug) << "Sequence " << mdSequence << " is using metadata timestamps.";
-
 				request->metadata().set(controls::SensorTimestamp,
 							std::get<1>(waitingForMDBuffer_.front()));
+				/* \todo: DNI: This is just to prove it is working.*/
+				LOG(UVC, Debug) << "Sequence " << mdSequence << " is using metadata timestamp: "
+			<< request->metadata().get(controls::SensorTimestamp).value();
 				pipe()->completeBuffer(request, buffer);
 				pipe()->completeRequest(request);
 				waitingForMDBuffer_.pop();
@@ -963,16 +978,18 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	 * metadata buffer's timestamp.
 	 *
 	 */
+	printUVCMD(*mappedMetaAddresses_[pos]);
 	if (!waitingForVideoBuffer_.empty()) {
 		Request *request = std::get<0>(waitingForVideoBuffer_.front());
 		FrameBuffer *vidBuffer = std::get<1>(waitingForVideoBuffer_.front());
 		unsigned int vidSequence = vidBuffer->metadata().sequence;
 
 		if (vidSequence == mdSequence) {
-			/* \todo: DNI: This is just to prove it is working.*/
-			LOG(UVC, Debug) << "Sequence " << vidSequence << " is using metadata timestamps.";
 			request->metadata().set(controls::SensorTimestamp,
 						mappedMetaAddresses_[pos]->ts);
+			/* \todo: DNI: This is just to prove it is working.*/
+			LOG(UVC, Debug) << "Sequence " << vidSequence << " is using metadata timestamp: "
+			<< request->metadata().get(controls::SensorTimestamp).value();
 			pipe()->completeBuffer(request, vidBuffer);
 			pipe()->completeRequest(request);
 			waitingForVideoBuffer_.pop();
