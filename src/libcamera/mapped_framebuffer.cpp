@@ -172,12 +172,13 @@ MappedBuffer::~MappedBuffer()
  * \brief Map all planes of a FrameBuffer
  * \param[in] buffer FrameBuffer to be mapped
  * \param[in] flags Protection flags to apply to map
+ * \param[in] usePlaneOffset Use offset stored in buffer's plane; default false
  *
  * Construct an object to map a frame buffer for CPU access. The mapping can be
  * made as Read only, Write only or support Read and Write operations by setting
  * the MapFlag flags accordingly.
  */
-MappedFrameBuffer::MappedFrameBuffer(const FrameBuffer *buffer, MapFlags flags)
+MappedFrameBuffer::MappedFrameBuffer(const FrameBuffer *buffer, MapFlags flags, bool usePlaneOffset)
 {
 	ASSERT(!buffer->planes().empty());
 	planes_.reserve(buffer->planes().size());
@@ -223,8 +224,14 @@ MappedFrameBuffer::MappedFrameBuffer(const FrameBuffer *buffer, MapFlags flags)
 		const int fd = plane.fd.get();
 		auto &info = mappedBuffers[fd];
 		if (!info.address) {
-			void *address = mmap(nullptr, info.mapLength, mmapFlags,
-					     MAP_SHARED, fd, 0);
+			void *address;
+			if (usePlaneOffset) {
+				address = mmap(nullptr, plane.length, mmapFlags,
+					       MAP_SHARED, fd, plane.offset);
+			} else {
+				address = mmap(nullptr, info.mapLength, mmapFlags,
+					       MAP_SHARED, fd, 0);
+			}
 			if (address == MAP_FAILED) {
 				error_ = -errno;
 				LOG(Buffer, Error) << "Failed to mmap plane: "
@@ -233,10 +240,13 @@ MappedFrameBuffer::MappedFrameBuffer(const FrameBuffer *buffer, MapFlags flags)
 			}
 
 			info.address = static_cast<uint8_t *>(address);
-			maps_.emplace_back(info.address, info.mapLength);
+			maps_.emplace_back(info.address, usePlaneOffset ? info.mapLength :
+			                                                  plane.length);
 		}
 
-		planes_.emplace_back(info.address + plane.offset, plane.length);
+		uint8_t *storedAddress = usePlaneOffset ? info.address :
+		                                          info.address + plane.offset;
+		planes_.emplace_back(storedAddress, plane.length);
 	}
 }
 
