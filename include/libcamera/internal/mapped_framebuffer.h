@@ -54,7 +54,8 @@ public:
 
 	using MapFlags = Flags<MapFlag>;
 
-	MappedFrameBuffer(const FrameBuffer *buffer, MapFlags flags);
+	MappedFrameBuffer(const FrameBuffer *buffer,
+			  MapFlags flags, bool usePlaneOffset = false);
 };
 
 LIBCAMERA_FLAGS_ENABLE_OPERATORS(MappedFrameBuffer::MapFlag)
