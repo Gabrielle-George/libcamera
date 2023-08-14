@@ -24,6 +24,7 @@
 
 #include "libcamera/internal/camera.h"
 #include "libcamera/internal/device_enumerator.h"
+#include "libcamera/internal/mapped_framebuffer.h"
 #include "libcamera/internal/media_device.h"
 #include "libcamera/internal/pipeline_handler.h"
 #include "libcamera/internal/sysfs.h"
@@ -51,10 +52,16 @@ public:
 	std::unique_ptr<V4L2VideoDevice> video_;
 	std::unique_ptr<V4L2VideoDevice> metadata_;
 	Stream stream_;
+	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
+	std::map<unsigned int, MappedFrameBuffer> mappedMetadataBuffers_;
+	bool useMetadataStream_;
+
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 
 private:
 	int initMetadata(MediaDevice *media);
+
+	const unsigned int minLengthHeaderBuf_ = 10;
 
 	bool generateId();
 
@@ -95,6 +102,10 @@ private:
 	int processControl(ControlList *controls, unsigned int id,
 			   const ControlValue &value);
 	int processControls(UVCCameraData *data, Request *request);
+
+	int createMetadataBuffers(Camera *camera, unsigned int count);
+	int cleanupMetadataBuffers(Camera *camera);
+	int cleanup(Camera *camera);
 
 	UVCCameraData *cameraData(Camera *camera)
 	{
@@ -225,8 +236,64 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 		return -EINVAL;
 
 	cfg.setStream(&data->stream_);
-
 	return 0;
+}
+
+int PipelineHandlerUVC::cleanupMetadataBuffers(Camera *camera)
+{
+	int ret = 0;
+	UVCCameraData *data = cameraData(camera);
+
+	ret = data->metadata_->releaseBuffers();
+	data->metadataBuffers_.clear(); //call the destructor for the frame buffers
+	data->mappedMetadataBuffers_.clear();
+	data->useMetadataStream_ = false;
+
+	return ret;
+}
+
+int PipelineHandlerUVC::cleanup(Camera *camera)
+{
+	UVCCameraData *data = cameraData(camera);
+	cleanupMetadataBuffers(camera);
+	data->video_->releaseBuffers();
+	return 0;
+}
+
+/*
+ * UVC Metadata stream does not support exporting buffers via EXPBUF,
+ * so it is necessary to create and store mmap-ed addresses.
+ * Metadata buffers are internal to libcamera. They are not, and
+ * cannot be, exposed to the user.
+ *
+ * Returns the number of buffers allocated and mapped.
+ *
+ * \return The number of buffers allocated, or a negative error code if
+ * the number of buffers allocated was not equal to "count"
+ * \retval -EINVAL if "count" buffers were not successfully allocated.
+ * \retval -ENOMEM if mmap failed.
+ */
+int PipelineHandlerUVC::createMetadataBuffers(Camera *camera, unsigned int count)
+{
+	UVCCameraData *data = cameraData(camera);
+	int ret = data->metadata_->allocateBuffers(count, &data->metadataBuffers_);
+	if (ret < 0)
+		return -EINVAL;
+
+	for (unsigned int i = 0; i < count; i++) {
+		MappedFrameBuffer mappedBuffer(data->metadataBuffers_[i].get(),
+					       MappedFrameBuffer::MapFlag::Read, true);
+		if (!mappedBuffer.isValid()) {
+			LOG(UVC, Error)
+				<< "Failed to mmap metadata buffer: "
+				<< strerror(mappedBuffer.error());
+			return mappedBuffer.error();
+		}
+
+		data->mappedMetadataBuffers_.emplace(i, std::move(mappedBuffer));
+		data->metadataBuffers_[i]->setCookie(i);
+	}
+	return ret;
 }
 
 int PipelineHandlerUVC::exportFrameBuffers(Camera *camera, Stream *stream,
@@ -247,20 +314,46 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 	if (ret < 0)
 		return ret;
 
+	if (data->useMetadataStream_) {
+		if (createMetadataBuffers(camera, count) < 0) {
+			LOG(UVC, Error) << "Unable to allocate buffers for UVC metadata stream.";
+			data->useMetadataStream_ = false;
+		}
+	}
+
 	ret = data->video_->streamOn();
 	if (ret < 0) {
-		data->video_->releaseBuffers();
+		cleanup(camera);
 		return ret;
 	}
 
+	if (data->useMetadataStream_) {
+		ret = data->metadata_->streamOn();
+		if (ret) {
+			LOG(UVC, Error) << "Failed to start metadata stream";
+			return ret;
+		}
+
+		for (std::unique_ptr<FrameBuffer> &buf : data->metadataBuffers_) {
+			ret = data->metadata_->queueBuffer(buf.get());
+			if (ret < 0) {
+				cleanupMetadataBuffers(camera);
+				return ret;
+			}
+		}
+	}
 	return 0;
 }
 
 void PipelineHandlerUVC::stopDevice(Camera *camera)
 {
 	UVCCameraData *data = cameraData(camera);
+
 	data->video_->streamOff();
-	data->video_->releaseBuffers();
+
+	data->metadata_->streamOff();
+
+	cleanup(camera);
 }
 
 int PipelineHandlerUVC::processControl(ControlList *controls, unsigned int id,
