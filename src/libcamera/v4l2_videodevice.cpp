@@ -1402,18 +1402,27 @@ std::unique_ptr<FrameBuffer> V4L2VideoDevice::createBuffer(unsigned int index)
 
 	std::vector<FrameBuffer::Plane> planes;
 	for (unsigned int nplane = 0; nplane < numPlanes; nplane++) {
-		UniqueFD fd = exportDmabufFd(buf.index, nplane);
-		if (!fd.isValid())
-			return nullptr;
-
 		FrameBuffer::Plane plane;
-		plane.fd = SharedFD(std::move(fd));
-		/*
-		 * V4L2 API doesn't provide dmabuf offset information of plane.
-		 * Set 0 as a placeholder offset.
-		 * \todo Set the right offset once V4L2 API provides a way.
-		 */
-		plane.offset = 0;
+
+		if (buf.type == V4L2_BUF_TYPE_META_CAPTURE) {
+			/*
+			 * Dmabuf fd is not exported for metadata, so store
+			 * the offset from the querybuf call and this device's fd.
+			 */
+			plane.fd = SharedFD(this->fd());
+			plane.offset = buf.m.offset;
+		} else {
+			UniqueFD fd = exportDmabufFd(buf.index, nplane);
+			if (!fd.isValid())
+				return nullptr;
+			plane.fd = SharedFD(std::move(fd));
+			/*
+			* V4L2 API doesn't provide dmabuf offset information of plane.
+			* Set 0 as a placeholder offset.
+			* \todo Set the right offset once V4L2 API provides a way.
+			*/
+			plane.offset = 0;
+		}
 		plane.length = multiPlanar ? buf.m.planes[nplane].length : buf.length;
 
 		planes.push_back(std::move(plane));
