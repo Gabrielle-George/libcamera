@@ -11,6 +11,7 @@
 #include <math.h>
 #include <memory>
 #include <tuple>
+#include <deque>
 
 #include <linux/uvcvideo.h>
 
@@ -39,9 +40,39 @@ LOG_DEFINE_CATEGORY(UVC)
 /* This is used to memcpy */
 struct UVCMetadataPacked {
 	__u32 pts;
-	__u32 scr;
+	__u32 stc;
 	__u16 sofDevice;
 } __attribute__((packed));
+
+struct UVCTimestampData {
+	__u64 ts_host;
+	__u16 sof_host;
+	__u32 stc_dev;
+	__u16 sof_dev;
+	__u32 pts_dev;
+};
+
+void printUVCMD(uvc_meta_buf &buf)
+{
+	UVCMetadataPacked metadataBuf;
+	__u8 minLength = 10 +
+			sizeof(buf.length) +
+			sizeof(buf.flags);
+	size_t lenMDPacket = minLength + sizeof(buf.ns) + sizeof(buf.sof);
+	memcpy(&metadataBuf, &buf.buf, lenMDPacket);
+
+	LOG(UVC, Gab) << "UVC: \n" <<
+	"v4l2 ts: " << buf.ns << "\n" <<
+	"sof host: "<< "0x" << std::setfill('0') << std::setw(4) << 
+		std::right << std::hex << buf.sof<< "\n" << 
+	"length: " << static_cast<int>(buf.length) <<"\n" <<
+	"flags: " << "0x" << std::hex << static_cast<int>(buf.flags) 
+		<< std::dec <<"\n" <<
+	"PTS: " << metadataBuf.pts <<"\n" <<
+	"STC: "<< metadataBuf.stc <<"\n" <<
+	"SOF: " << "0x" << std::setfill('0') << std::setw(4) << 
+		std::right << std::hex << metadataBuf.sofDevice;
+}
 
 class UVCCameraData : public Camera::Private
 {
@@ -72,9 +103,12 @@ public:
 
 private:
 	int initMetadata(MediaDevice *media);
+	void addTimestampData(uvc_meta_buf &rawMetadata);
 
+	std::deque<UVCTimestampData> timeSamples_;
 	const unsigned int frameStart_ = 1;
 	const unsigned int maxVidBuffersInQueue_ = 1;
+	const unsigned int bufferRingSize_ = 32;
 
 	bool generateId();
 
@@ -917,6 +951,30 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	}
 }
 
+void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata){
+	if (timeSamples_.size() == bufferRingSize_){
+		timeSamples_.pop_front();
+	}
+
+	/*
+	 * Copy over the buffer packet from the raw Metadata
+	 * into values we can use. Populate the storage struct
+	 * with the data we need to calculate timestamps.
+	 * Add to the circular queue.
+	 */
+	UVCMetadataPacked packed;
+	memcpy(&packed, rawMetadata.buf, sizeof(UVCMetadataPacked));
+
+	UVCTimestampData data;
+	data.pts_dev = packed.pts;
+	data.sof_dev = packed.sofDevice;
+	data.stc_dev = packed.stc;
+	data.sof_host = rawMetadata.sof;
+	data.ts_host = rawMetadata.ns;
+
+	timeSamples_.push_back(data);
+}
+
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
 	if (!useMetadataStream_ ||
@@ -954,6 +1012,8 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 		useMetadataStream_ = false;
 		return;
 	}
+
+	addTimestampData(metadataBuf);
 
 	/*
 	 * If there is a video buffer that hasn't been matched with a
