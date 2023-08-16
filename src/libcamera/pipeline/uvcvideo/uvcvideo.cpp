@@ -6,12 +6,12 @@
  */
 
 #include <algorithm>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <math.h>
 #include <memory>
 #include <tuple>
-#include <deque>
 
 #include <linux/uvcvideo.h>
 
@@ -951,8 +951,9 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	}
 }
 
-void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata){
-	if (timeSamples_.size() == bufferRingSize_){
+void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata)
+{
+	if (timeSamples_.size() == bufferRingSize_) {
 		timeSamples_.pop_front();
 	}
 
