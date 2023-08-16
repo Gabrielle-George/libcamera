@@ -883,6 +883,69 @@ void UVCCameraData::addControl(uint32_t cid, const ControlInfo &v4l2Info,
 	ctrls->emplace(id, info);
 }
 
+/* 
+ * The following device to kernel timestamp conversion
+ * algorithm is from the Linux kernel's implementation 
+ * of UVC timestamp calculation. Details on the algorithm 
+ * can be found there.
+ * \todo: put a link/source here
+ */
+ __u64 calculateTimestamp(const UVCTimestampData &p1, 
+ 						  const UVCTimestampData &p2,
+						  __u32 pts)
+{
+	/* Step 1: get usb sof from device data*/
+	__u64 timestamp;
+	__u32 delta_stc;
+	__u32 y1, y2;
+	__u32 x1, x2;
+	__u32 mean;
+	__u32 sof;
+	__u64 y;
+    
+    delta_stc = pts - (1UL << 31);
+	x1 = p1.stc_dev - delta_stc;
+	x2 = p2.stc_dev - delta_stc;
+	if (x1 == x2)
+		return p1.ts_host;
+
+	y1 = (p1.sof_dev + 2048) << 16;
+	y2 = (p2.sof_dev + 2048) << 16;
+	if (y2 < y1)
+		y2 += 2048 << 16;
+
+	y = (__u64)(y2 - y1) * (1ULL << 31) + (__u64)y1 * (__u64)x2
+	  - (__u64)y2 * (__u64)x1;
+	sof = y/( x2 - x1); /* the original version can't use floating point */
+
+	/* \todo: convert host */
+
+	/* Convert from USB sof to kernel timestamp */
+
+    x1 = (p1.sof_host + 2048) << 16;
+	x2 = (p2.sof_host+ 2048) << 16;
+	if (x2 < x1)
+		x2 += 2048 << 16;
+	if (x1 == x2)
+		return -1;
+
+	y1 = 1000000000;
+	y2 = (__u32)(__s64)(p2.ts_host - p1.ts_host) + y1;
+
+	mean = (x1 + x2) / 2;
+	if (mean - (1024 << 16) > sof)
+		sof += 2048 << 16;
+	else if (sof > mean + (1024 << 16))
+		sof -= 2048 << 16;
+
+	y = (__u64)(y2 - y1) * (__u64)sof + (__u64)y1 * (__u64)x2
+	  - (__u64)y2 * (__u64)x1;
+	y = y/(x2 - x1);
+
+	timestamp = p1.ts_host + y - y1;
+	return timestamp;
+ }
+
 /*
  * If there is a metadata buffer that hasn't been matched with a
  * video buffer, check to see if it matches this video buffer.
@@ -923,6 +986,13 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 			unsigned int mdSequence =
 				std::get<0>(waitingForMDBuffer_.front()) + frameStart_;
 			if (mdSequence == buffer->metadata().sequence) {
+				__u64 timestamp = calculateTimestamp(timeSamples_.front(), 
+				                   timeSamples_.back(), 
+								   timeSamples_.back().pts_dev );
+				LOG(UVC, Gab) << "calc: " << timestamp << 
+				                 " act: " << std::get<1>(waitingForMDBuffer_.front()) <<
+								 " diff:" << std::get<1>(waitingForMDBuffer_.front()) - timestamp;
+
 				request->metadata().set(controls::SensorTimestamp,
 							std::get<1>(waitingForMDBuffer_.front()));
 				pipe()->completeBuffer(request, buffer);
