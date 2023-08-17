@@ -103,7 +103,7 @@ public:
 
 private:
 	int initMetadata(MediaDevice *media);
-	void addTimestampData(uvc_meta_buf &rawMetadata);
+	void addTimestampData(uvc_meta_buf &rawMetadata, UVCMetadataPacked &packed);
 
 	std::deque<UVCTimestampData> timeSamples_;
 	const unsigned int frameStart_ = 1;
@@ -1021,7 +1021,7 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	}
 }
 
-void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata)
+void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata, UVCMetadataPacked &packed)
 {
 	if (timeSamples_.size() == bufferRingSize_) {
 		timeSamples_.pop_front();
@@ -1033,9 +1033,7 @@ void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata)
 	 * with the data we need to calculate timestamps.
 	 * Add to the circular queue.
 	 */
-	UVCMetadataPacked packed;
-	memcpy(&packed, rawMetadata.buf, sizeof(UVCMetadataPacked));
-
+	
 	UVCTimestampData data;
 	data.pts_dev = packed.pts;
 	data.sof_dev = packed.sofDevice;
@@ -1084,7 +1082,9 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 		return;
 	}
 
-	addTimestampData(metadataBuf);
+	UVCMetadataPacked packed;
+	memcpy(&packed, &(mappedMetadataBuffers_.at(pos).planes()[0].data()[sizeof(uvc_meta_buf)]), sizeof(UVCMetadataPacked));
+	addTimestampData(metadataBuf, packed);
 
 	/*
 	 * If there is a video buffer that hasn't been matched with a
