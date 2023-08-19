@@ -883,68 +883,150 @@ void UVCCameraData::addControl(uint32_t cid, const ControlInfo &v4l2Info,
 	ctrls->emplace(id, info);
 }
 
+/* The precision of the host sof may be lower than the 11 bits for other
+ * sof values.  Recover the host SOF.  See the Linux UVC driver for details.
+ */
+static __u16 recoverHostSOF(__u16 hostSOF, __u16 deviceSOF){
+	__s8 deltaSOF;
+
+	deltaSOF = (hostSOF - deviceSOF) & 255;
+
+	return (deviceSOF + deltaSOF) & 2047;
+}
+
+float sof_global = 0.0;
 /* 
  * The following device to kernel timestamp conversion
- * algorithm is from the Linux kernel's implementation 
+ * algorithm is based on the Linux kernel's implementation 
  * of UVC timestamp calculation. Details on the algorithm 
  * can be found there.
- * \todo: put a link/source here
  */
  __u64 calculateTimestamp(const UVCTimestampData &p1, 
  						  const UVCTimestampData &p2,
-						  __u32 pts)
+						  const __u32 PTS)
 {
-	/* Step 1: get usb sof from device data*/
-	__u64 timestamp;
-	__u32 delta_stc;
-	__u32 y1, y2;
-	__u32 x1, x2;
+	// LOG(UVC, Gab) << "sof dev p1: " << p1.sof_dev << "\n" <<
+	// 				 "sof dev p2: " << p2.sof_dev << "\n" <<
+	// 				 "sof ker p1: " << p1.sof_host << "\n" <<
+	// 				 "sof ker p2: " << p2.sof_host << "\n" <<
+	// 				 "sof stc p1: " << p1.stc_dev<< "\n"<<
+	// 				 "sof stc p2: " << p2.stc_dev<< "\n"<<
+	// 				 "sof pts p1: " << p1.pts_dev<< "\n"<<
+	// 				 "sof pts p2: " << p2.pts_dev<< "\n";
+
+	__u16 sof1Device;
+	__u16 sof2Device;
+	__u32 stc1;
+	__u32 stc2;
+	__u16 sof1Host;
+	__u16 sof2Host;
 	__u32 mean;
-	__u32 sof;
-	__u64 y;
-    
-    delta_stc = pts - (1UL << 31);
-	x1 = p1.stc_dev - delta_stc;
-	x2 = p2.stc_dev - delta_stc;
-	if (x1 == x2)
-		return p1.ts_host;
+	__u32 pts;
+	__u64 hostTS1;
+	__u64 hostTS2;
 
-	y1 = (p1.sof_dev + 2048) << 16;
-	y2 = (p2.sof_dev + 2048) << 16;
-	if (y2 < y1)
-		y2 += 2048 << 16;
+	float sof;
+	bool sofRolledOver = false;
+	pts = PTS;
 
-	y = (__u64)(y2 - y1) * (1ULL << 31) + (__u64)y1 * (__u64)x2
-	  - (__u64)y2 * (__u64)x1;
-	sof = y/( x2 - x1); /* the original version can't use floating point */
+	sof1Device = p1.sof_dev+2048;
+	stc1 = p1.stc_dev;
+	sof2Device = p2.sof_dev+2048;
+	stc2 = p2.stc_dev;
+	hostTS1 = 0;
+	hostTS2 = p2.ts_host - p1.ts_host; 
 
-	/* \todo: convert host */
+    /* Step 1: get usb sof from device data */
 
-	/* Convert from USB sof to kernel timestamp */
+	/*
+	 * If the sof field rolled over, add 2048
+	 * so we can extrapolate the line. Set a flag
+	 * indicating we did this so we can subtract 2048 
+	 * back out again.
+	 */
+	if (sof2Device < sof1Device){
+		sof2Device += 2048;
+		sofRolledOver = true;
+	}	
+	/* If the STC value rolled over, subtract half the
+	 * 32 bit range from the STC and PTS values so they 
+	 * fit in the rollover window.
+	 */
+	if (stc2 < stc1){
+        stc1 -= (1<<31);
+        stc2 -= (1<<31);
+        pts  -= (1<<31);
+	}
 
-    x1 = (p1.sof_host + 2048) << 16;
-	x2 = (p2.sof_host+ 2048) << 16;
-	if (x2 < x1)
-		x2 += 2048 << 16;
-	if (x1 == x2)
-		return -1;
+	/* cast the values or they may overflow at the multiplication step*/
+	sof = static_cast<float>((static_cast<__u64>((sof2Device - sof1Device))*static_cast<__u64>(pts)
+	       + static_cast<__u64>(sof1Device) * static_cast<__u64>(stc2) 
+		   - static_cast<__u64>(sof2Device) * static_cast<__u64>(stc1)
+		   ))
+	       /static_cast<float>((stc2-stc1));
 
-	y1 = 1000000000;
-	y2 = (__u32)(__s64)(p2.ts_host - p1.ts_host) + y1;
+    if (sofRolledOver){
+		LOG(UVC,Gab)<<"rolled";
+        //sof-=2048.0f;
+	}
 
-	mean = (x1 + x2) / 2;
-	if (mean - (1024 << 16) > sof)
-		sof += 2048 << 16;
-	else if (sof > mean + (1024 << 16))
-		sof -= 2048 << 16;
+    /* Step 2: get kernel timestamp from usb sof */
+	sof1Host = recoverHostSOF(p1.sof_host,p1.sof_dev)+2048;
+	sof2Host = recoverHostSOF(p2.sof_host,p2.sof_dev)+2048;
 
-	y = (__u64)(y2 - y1) * (__u64)sof + (__u64)y1 * (__u64)x2
-	  - (__u64)y2 * (__u64)x1;
-	y = y/(x2 - x1);
+	/* 
+	 * This accounts for the possibility that the calculated sof 
+	 * rolled over and the host sof data fields did not.
+	 */
+    mean = (sof1Host + sof2Host)/2;
 
-	timestamp = p1.ts_host + y - y1;
-	return timestamp;
+    if ((mean - 1024) > sof){
+		LOG(UVC,Gab) << "mean is too big";
+        sof += 2048;
+    }else if (sof > mean + 1024){
+		LOG(UVC,Gab) << "mean is too smol";
+        sof -= 2048;
+	}
+
+	// LOG(UVC,Gab) << "sof1Device: " << sof1Device;
+	// LOG(UVC,Gab) << "sof2Device: " << sof2Device;
+	// LOG(UVC,Gab) << "stc1: " << stc1;
+	// LOG(UVC,Gab) << "stc2: " << stc2;
+	// LOG(UVC,Gab) << "sof1Host: " << sof1Host;
+	// LOG(UVC,Gab) << "sof2Host: " << sof2Host;
+	// LOG(UVC,Gab) << "mean: " << mean;
+	// LOG(UVC,Gab) << "pts: " << pts;
+	// LOG(UVC,Gab) << "sof: " << sof;
+	// LOG(UVC,Gab) << "sofRolledOver: " << sofRolledOver;
+	// LOG(UVC,Gab) << "pts: " << pts;
+	// LOG(UVC,Gab) << "ts1: " << p1.ts_host;
+	// LOG(UVC,Gab) << "ts2: " << p2.ts_host;
+
+	/* hostTs1 has been set to zero so the difference is just the value of hostTS2.*/
+	unsigned long long ts2_ts1_diff_mult_sof = hostTS2 *sof; 
+	unsigned long long ts1_mult_sof2 = hostTS1 * sof2Host;
+	unsigned long long ts2_mult_sof1 = hostTS2 * sof1Host;
+	unsigned long long divisor = sof2Host - sof1Host;
+
+	LOG(UVC,Gab)<<"(p2.ts_host - p1.ts_host): " << p2.ts_host - p1.ts_host;
+	LOG(UVC,Gab)<< "(p2.ts_host - p1.ts_host) * sof: " << ts2_ts1_diff_mult_sof;
+	LOG(UVC,Gab)<< "p1.ts_host * sof2Host - p2.ts_host * sof1Host: " <<ts1_mult_sof2- ts2_mult_sof1; 
+	LOG(UVC,Gab)<< "(p2.ts_host - p1.ts_host) * sof + p1.ts_host * sof2Host - p2.ts_host * sof1Host) : " << (ts2_ts1_diff_mult_sof + ts1_mult_sof2 - ts2_mult_sof1 );
+	LOG(UVC,Gab)<< "(sof2Host - sof1Host): "<< divisor;
+	__u64 result = static_cast<__u64>((ts2_ts1_diff_mult_sof + ts1_mult_sof2 - ts2_mult_sof1 ) / (divisor));
+	LOG(UVC,Gab)<< "final: "<<result;
+	sof_global = sof;
+    return result+p1.ts_host;
  }
+
+void printTS(UVCTimestampData data, int id){
+	LOG(UVC,Gab) << "pts_dev"<<id<<"=" << data.pts_dev;
+	LOG(UVC,Gab) << "sof_dev" <<id<<"=" << data.sof_dev;
+	LOG(UVC,Gab) << "sof_host" <<id<<"=" << data.sof_host;
+	LOG(UVC,Gab) << "stc_dev" <<id<<"=" << data.stc_dev;
+	LOG(UVC,Gab) << "ts_host" <<id<<"=" << data.ts_host;
+	LOG(UVC,Gab) << "sof=" << sof_global;
+}
 
 /*
  * If there is a metadata buffer that hasn't been matched with a
@@ -986,12 +1068,23 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 			unsigned int mdSequence =
 				std::get<0>(waitingForMDBuffer_.front()) + frameStart_;
 			if (mdSequence == buffer->metadata().sequence) {
-				__u64 timestamp = calculateTimestamp(timeSamples_.front(), 
-				                   timeSamples_.back(), 
-								   timeSamples_.back().pts_dev );
-				LOG(UVC, Gab) << "calc: " << timestamp << 
-				                 " act: " << std::get<1>(waitingForMDBuffer_.front()) <<
-								 " diff:" << std::get<1>(waitingForMDBuffer_.front()) - timestamp;
+				if (timeSamples_.size() >1){
+					__u64 timestamp = calculateTimestamp(timeSamples_.front(), 
+									timeSamples_.back(), 
+									timeSamples_.back().pts_dev );
+					LOG(UVC, Gab) << "calc: " << timestamp;
+					LOG(UVC, Gab)<< " DIFF:" << buffer->metadata().timestamp - (long long)timestamp;
+					if (buffer->metadata().timestamp - (long long)timestamp > 2000000000){
+						LOG(UVC, Gab) << "\nfront:";
+						printTS(timeSamples_.front(),1);
+						LOG(UVC, Gab) << "back:";
+						printTS(timeSamples_.back(),2);
+						LOG(UVC, Gab) << "\n";
+
+					}
+
+				}
+								   
 
 				request->metadata().set(controls::SensorTimestamp,
 							std::get<1>(waitingForMDBuffer_.front()));
@@ -1033,13 +1126,22 @@ void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata, UVCMetadataPacke
 	 * with the data we need to calculate timestamps.
 	 * Add to the circular queue.
 	 */
-	
+
 	UVCTimestampData data;
 	data.pts_dev = packed.pts;
 	data.sof_dev = packed.sofDevice;
 	data.stc_dev = packed.stc;
 	data.sof_host = rawMetadata.sof;
 	data.ts_host = rawMetadata.ns;
+
+	// LOG(UVC, Gab) << "pts dev: " << data.pts_dev;
+	// LOG(UVC, Gab) << "data.sof_dev: " << data.sof_dev;
+	// LOG(UVC, Gab) << "data.stc_dev: " << data.stc_dev;
+	// LOG(UVC, Gab) << "data.sof_host: " << data.sof_host;
+	// LOG(UVC, Gab) << "data.ts_host: " << data.ts_host;
+
+
+
 
 	timeSamples_.push_back(data);
 }
@@ -1084,6 +1186,13 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 
 	UVCMetadataPacked packed;
 	memcpy(&packed, &(mappedMetadataBuffers_.at(pos).planes()[0].data()[sizeof(uvc_meta_buf)]), sizeof(UVCMetadataPacked));
+	// LOG(UVC,Gab)<<"pts: " << packed.pts;
+	// LOG(UVC,Gab)<<"stc: " << packed.stc;
+
+	// //LOG(UVC,Gab) << "new stuff: \n";
+	// //printUVCMD(metadataBuf);
+	// LOG(UVC,Gab)<<"pts: " << packed.pts;
+	// LOG(UVC,Gab)<<"stc: " << packed.stc;
 	addTimestampData(metadataBuf, packed);
 
 	/*
@@ -1108,6 +1217,14 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 		unsigned int vidSequence = vidBuffer->metadata().sequence;
 
 		if (vidSequence == mdSequence) {
+			if (timeSamples_.size() >1){
+				__u64 calculate_ts = calculateTimestamp(timeSamples_.front(), 
+								timeSamples_.back(), 
+								timeSamples_.back().pts_dev );
+				LOG(UVC,Gab)<<"timestamp calc: " << calculate_ts;
+				LOG(UVC,Gab)<<"DIFF: "<<  buffer->metadata().timestamp - calculate_ts;
+
+			}
 			request->metadata().set(controls::SensorTimestamp,
 						timestamp);
 
