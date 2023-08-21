@@ -1183,9 +1183,6 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 		useMetadataStream_ = false;
 		return;
 	}
-
-	UVCMetadataPacked packed;
-	memcpy(&packed, &(mappedMetadataBuffers_.at(pos).planes()[0].data()[sizeof(uvc_meta_buf)]), sizeof(UVCMetadataPacked));
 	// LOG(UVC,Gab)<<"pts: " << packed.pts;
 	// LOG(UVC,Gab)<<"stc: " << packed.stc;
 
