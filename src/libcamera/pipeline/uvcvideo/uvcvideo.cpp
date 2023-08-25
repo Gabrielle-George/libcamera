@@ -40,12 +40,14 @@ LOG_DEFINE_CATEGORY(UVC)
 /*
  * The UVCH buffer contains an unsigned char array
  * encoding UVC timing data that needs to be recast
- * into usable data.
+ * into usable data. The contents of that array are
+ * specified in the UVC specifications manual, and are
+ * copied here exactly as they are specified.
  */
 struct UVCTimingBuf {
-	__u32 pts;
-	__u32 stc;
-	__u16 sofDevice;
+	unsigned int pts; /* Presentation TimeStamp, in device clock time*/
+	unsigned int stc; /* Source Time Clock, in device clock time*/
+	unsigned short sofDevice; /* Start Of Frame, in usb frame number (clock) units*/
 } __attribute__((packed));
 
 class UVCCameraData : public Camera::Private
