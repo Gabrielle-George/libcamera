@@ -6,6 +6,7 @@
  */
 
 #include <algorithm>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <math.h>
@@ -50,6 +51,17 @@ struct UVCTimingBuf {
 	unsigned short sofDevice; /* Start Of Frame, in usb frame number (clock) units*/
 } __attribute__((packed));
 
+/* Raw timestamp input to the timestamp calculation function. */
+struct UVCTimestampData {
+	unsigned long long tsHost; /* System clock timestamp in nanoseconds*/
+	unsigned short sofHost; /* The usb clock at the time tsHost was taken*/
+	unsigned int stcDevice; /* The UVC device source timestamp */
+	unsigned short sofDevice; /* the usb clock at the time the STC was taken*/
+
+	/* presentation time stamp to be converted into a system clock timestamp */
+	unsigned int ptsDevice;
+};
+
 class UVCCameraData : public Camera::Private
 {
 public:
@@ -77,15 +89,18 @@ public:
 		mappedMetaAddresses_;
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 	std::queue<FrameBuffer *> pendingVideoBuffers_;
-	std::queue<std::pair<unsigned int, uint64_t>> pendingMetadata_;
+	std::queue<unsigned int> pendingMetadata_;
 
 private:
 	int initMetadata(MediaDevice *media);
 	void completeRequest(FrameBuffer *buffer, uint64_t timestamp);
 	void endCorruptedStream();
+	void addTimestampData(uvc_meta_buf &rawMetadata, UVCTimingBuf &packed);
 
+	std::deque<UVCTimestampData> timeSamples_;
 	const unsigned int frameStart_ = 1;
 	const unsigned int maxVidBuffersInQueue_ = 1;
+	const unsigned int bufferRingSize_ = 32;
 
 	bool generateId();
 
@@ -916,6 +931,13 @@ void UVCCameraData::endCorruptedStream()
 		<< "UVC metadata stream corrupted. Reverting to driver timestamps.";
 }
 
+unsigned long long calculateTimestamp([[maybe_unused]] const UVCTimestampData &p1,
+				      const UVCTimestampData &p2,
+				      [[maybe_unused]] const unsigned int PTS)
+{
+	return p2.tsHost;
+}
+
 /*
  * If there is a metadata buffer that hasn't been matched with a
  * video buffer, check to see if it matches this video buffer.
@@ -946,9 +968,17 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 
 	if (!pendingMetadata_.empty()) {
 		/* A metadata buffer was ready first. */
-		unsigned int mdSequence = std::get<0>(pendingMetadata_.front()) + frameStart_;
+		unsigned int mdSequence = pendingMetadata_.front() + frameStart_;
 		if (mdSequence == buffer->metadata().sequence) {
-			completeRequest(buffer, std::get<1>(pendingMetadata_.front()));
+			unsigned long long timestamp;
+			if (timeSamples_.size() > 1) {
+				timestamp = calculateTimestamp(timeSamples_.front(),
+							       timeSamples_.back(),
+							       timeSamples_.back().ptsDevice);
+			} else {
+				timestamp = buffer->metadata().timestamp;
+			}
+			completeRequest(buffer, timestamp);
 			pendingMetadata_.pop();
 			return;
 		} else {
@@ -966,6 +996,28 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	if (pendingVideoBuffers_.size() > maxVidBuffersInQueue_) {
 		endCorruptedStream();
 	}
+}
+
+void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata, UVCTimingBuf &packed)
+{
+	/*
+	 * Copy over the buffer packet from the raw Metadata
+	 * into values we can use. Populate the storage struct
+	 * with the data we need to calculate timestamps.
+	 * Add to the circular queue.
+	 */
+	UVCTimestampData data;
+	data.ptsDevice = packed.pts;
+	data.sofDevice = packed.sofDevice;
+	data.stcDevice = packed.stc;
+	data.sofHost = rawMetadata.sof;
+	data.tsHost = rawMetadata.ns;
+
+	if (timeSamples_.size() == bufferRingSize_) {
+		timeSamples_.pop_front();
+	}
+
+	timeSamples_.push_back(data);
 }
 
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
@@ -997,6 +1049,8 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 		return;
 	}
 
+	addTimestampData(*metaBuf, *timeBuf);
+
 	/*
 	 * Match a pending video buffer with this buffer's sequence.  If
 	 * there is none available, put this timestamp information on the
@@ -1008,15 +1062,19 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 		unsigned int vidSequence = vidBuffer->metadata().sequence;
 
 		if (vidSequence == mdSequence) {
-			completeRequest(vidBuffer, static_cast<uint64_t>(metaBuf->ns));
+			unsigned long long timestamp;
+			if (timeSamples_.size() > 1) {
+				timestamp = calculateTimestamp(timeSamples_.front(),
+							       timeSamples_.back(),
+							       timeSamples_.back().ptsDevice);
+			}
+			completeRequest(vidBuffer, timestamp);
 			pendingVideoBuffers_.pop();
 		} else {
 			endCorruptedStream();
 		}
 	} else {
-		pendingMetadata_.push(
-			std::make_pair(buffer->metadata().sequence,
-				       static_cast<uint64_t>(metaBuf->ns)));
+		pendingMetadata_.push(buffer->metadata().sequence);
 	}
 	metadata_->queueBuffer(buffer);
 }
