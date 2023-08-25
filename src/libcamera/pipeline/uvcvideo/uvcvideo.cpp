@@ -6,6 +6,7 @@
  */
 
 #include <algorithm>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <math.h>
@@ -49,6 +50,17 @@ struct UVCTimingBuf {
 	unsigned short sofDevice; /* Start Of Frame, in usb frame number (clock) units*/
 } __attribute__((packed));
 
+/* Raw timestamp input to the timestamp calculation function. */
+struct UVCTimestampData {
+	unsigned long long tsHost; /* System clock timestamp in nanoseconds*/
+	unsigned short sofHost; /* The usb clock at the time tsHost was taken*/
+	unsigned int stcDevice; /* The UVC device source timestamp */
+	unsigned short sofDevice; /* the usb clock at the time the STC was taken*/
+
+	/* presentation time stamp to be converted into a system clock timestamp */
+	unsigned int ptsDevice;
+};
+
 class UVCCameraData : public Camera::Private
 {
 public:
@@ -76,7 +88,7 @@ public:
 		mappedMetaAddresses_;
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 	std::queue<FrameBuffer *> pendingVideoBuffers_;
-	std::queue<std::tuple<unsigned int, unsigned long long>> pendingMetadata_;
+	std::queue<std::tuple<unsigned int, UVCTimestampData>> pendingMetadata_;
 
 private:
 	typedef enum MatchResult { 
@@ -89,9 +101,12 @@ private:
 	void completeRequest(FrameBuffer *buffer, uint64_t timestamp);
 	void endCorruptedMetadataStream();
 	MatchResult FindAndCompleteBuffer();
+	void addTimestampData(uvc_meta_buf &rawMetadata, UVCTimingBuf &packed);
 
+	std::deque<UVCTimestampData> timeSamples_;
 	const unsigned int frameStart_ = 1;
 	const unsigned int maxVidBuffersInQueue_ = 3;
+	const unsigned int bufferRingSize_ = 32;
 
 	bool generateId();
 
@@ -921,6 +936,13 @@ void UVCCameraData::endCorruptedMetadataStream()
 	handleUnfinishedRequests();
 }
 
+unsigned long long calculateTimestamp([[maybe_unused]] const UVCTimestampData &p1,
+				      const UVCTimestampData &p2,
+				      [[maybe_unused]] const unsigned int PTS)
+{
+	return p2.tsHost;
+}
+
 /*
  * If the front of the metadata buffer and video buffer queues do not 
  * have matching sequence numbers, sort through these queues to see
@@ -937,7 +959,13 @@ UVCCameraData::MatchResult UVCCameraData::FindAndCompleteBuffer()
 	unsigned int vdSeq = pendingVideoBuffers_.front()->metadata().sequence;
 
 	if (mdSeq==vdSeq){
-		completeRequest(pendingVideoBuffers_.front(), std::get<1>(pendingMetadata_.front()));
+		unsigned long long timestamp = pendingVideoBuffers_.front()->metadata().timestamp;
+		if (timeSamples_.size() > 1) {
+				timestamp = calculateTimestamp(std::get<1>(pendingMetadata_.front()),
+							       timeSamples_.back(),
+							       timeSamples_.back().ptsDevice);
+		}
+		completeRequest(pendingVideoBuffers_.front(), timestamp);
 		pendingVideoBuffers_.pop();
 		pendingMetadata_.pop();
 		return MatchFound;
@@ -946,6 +974,7 @@ UVCCameraData::MatchResult UVCCameraData::FindAndCompleteBuffer()
 
 	return MatchNotFound;
 }
+
 
 /*
  * If there is a metadata buffer that hasn't been matched with a
@@ -989,6 +1018,28 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	}
 }
 
+void UVCCameraData::addTimestampData(uvc_meta_buf &rawMetadata, UVCTimingBuf &packed)
+{
+	/*
+	 * Copy over the buffer packet from the raw Metadata
+	 * into values we can use. Populate the storage struct
+	 * with the data we need to calculate timestamps.
+	 * Add to the circular queue.
+	 */
+	UVCTimestampData data;
+	data.ptsDevice = packed.pts;
+	data.sofDevice = packed.sofDevice;
+	data.stcDevice = packed.stc;
+	data.sofHost = rawMetadata.sof;
+	data.tsHost = rawMetadata.ns;
+
+	if (timeSamples_.size() == bufferRingSize_) {
+		timeSamples_.pop_front();
+	}
+
+	timeSamples_.push_back(data);
+}
+
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
 	if (!metadata_ || 
@@ -1008,7 +1059,8 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	Span<uint8_t> planeData(mappedMetaAddresses_[pos].get(),
 				sizeof(uvc_meta_buf) + sizeof(UVCTimingBuf));
 	uvc_meta_buf *metaBufPlane = reinterpret_cast<uvc_meta_buf *>(planeData.data());
-	
+	UVCTimingBuf *timeBufPlane = reinterpret_cast<UVCTimingBuf *>(&planeData.data()[sizeof(uvc_meta_buf)]);
+
 	size_t UVCPayloadHeaderSize = sizeof(metaBufPlane->length) +
 				      sizeof(metaBufPlane->flags) + sizeof(UVCTimingBuf);
 	if (metaBufPlane->length < UVCPayloadHeaderSize) {
@@ -1016,11 +1068,12 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 		return;
 	}
 
-	unsigned long long ns = metaBufPlane->ns;
+	addTimestampData(*metaBufPlane, *timeBufPlane);
 	pendingMetadata_.push(
-			std::make_tuple(buffer->metadata().sequence, ns));
+			std::make_tuple(buffer->metadata().sequence, timeSamples_.back()));
 
 	FindAndCompleteBuffer();
+
 
 	metadata_->queueBuffer(buffer);
 }
