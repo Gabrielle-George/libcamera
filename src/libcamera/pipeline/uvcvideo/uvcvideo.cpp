@@ -936,11 +936,146 @@ void UVCCameraData::endCorruptedMetadataStream()
 	handleUnfinishedRequests();
 }
 
-unsigned long long calculateTimestamp([[maybe_unused]] const UVCTimestampData &p1,
-				      const UVCTimestampData &p2,
-				      [[maybe_unused]] const unsigned int PTS)
+
+/**
+ * \brief Calculate a more accurate host SOF
+ * \param[in] sofHost The usb clock time taken by the host
+ * \param[in] sofDevice The usb clock time taken by the device
+ * that has full 11 bit precision.
+ *
+ * The precision of the host sof may be lower than the expected 11 bits.
+ * Obtain a more precise host sof by adding back in the lower 8 bits
+ * of the difference between the host sof and the more precise device SOF.
+ *
+ * \return An updated usb clock time for the host with 11 bits of precision
+ */
+static unsigned short recoverHostSOF(unsigned short sofHost, unsigned short sofDevice)
 {
-	return p2.tsHost;
+	char sofDelta;
+
+	sofDelta = (sofHost - sofDevice) & 255;
+
+	return (sofDevice + sofDelta) & 2047;
+}
+
+/**
+ * \brief Convert the presentation timestamp recorded by the UVC device to
+ * a host timestamp.
+ * \param[in] p1 Timestamps taken by the usb clock, the device, and the host
+ * at an early point in time and provided by the UVC driver as metadata
+ * \param[in] p2 Timestamps taken by the usb clock, the device, and the host
+ * taken shortly after the presentation timestamp and provided by the UVC driver
+ * as metadata
+ * \param[in] PTS The presentation time stamp in device time to convert
+ * to a host timestamp.
+ *
+ * The following device to system clock timestamp conversion algorithm is based
+ * on the Linux kernel's implementation of UVC timestamp calculation.
+ *
+ * To convert the presentation time stamp provided by the device to a system
+ * clock timestamp, first convert the pts to the usb frame number (sof),
+ * and then from the usb sof to the system timestamp.  The relationship between
+ * the device clock and the usb clock is linear, as is the relationship between
+ * the usb clock and the system clock.  To calculate the equations needed for the
+ * conversion, V4L2 provides a metadata packet with a source timestamp (stc)
+ * and a usb clock sof taken at the same point in time, as well as a system
+ * timestamp and a usb clock sof pairing.
+ *
+ * Two sets of the timestamp metadata are used to recover this linear relationship
+ * and convert the pts into system clock time.
+ *
+ * \return The PTS timestamp converted to system clock time.
+ */
+unsigned long long calculateTimestamp(const UVCTimestampData &p1,
+				      const UVCTimestampData &p2,
+				      const unsigned int PTS)
+{
+	unsigned short sof1Device;
+	unsigned short sof2Device;
+	unsigned int stc1;
+	unsigned int stc2;
+	unsigned short sof1Host;
+	unsigned short sof2Host;
+	unsigned int mean;
+	unsigned int pts;
+	unsigned long long hostTS1;
+	unsigned long long hostTS2;
+
+	float sof;
+	pts = PTS;
+
+	/* Add 2048 to both sof values to prevent underflow */
+	sof1Device = p1.sofDevice + 2048;
+	stc1 = p1.stcDevice;
+	sof2Device = p2.sofDevice + 2048;
+	stc2 = p2.stcDevice;
+
+	/* Subtract out the first point's host timestamp for simplicity */
+	hostTS1 = 0;
+	hostTS2 = p2.tsHost - p1.tsHost;
+
+	/*
+	 * Step 1: Convert the pts into an sof usb clock time
+	 * from p1 and p2's stc and sof time pairs.
+	 *
+	 * The equation is:
+	 * sof = ((sof1 - sof2) *pts + sof1 * stc2 - sof2 * stc1) / ( stc2 - stc1)
+	 */
+
+	/* If the sof field rolled over, add 2048 so we can extrapolate the line. */
+	if (sof2Device < sof1Device) {
+		sof2Device += 2048;
+	}
+
+	/*
+	 * If the stc value rolled over, subtract half the 32 bit range from the
+	 * stc and pts values so they fit in the rollover window.
+	 */
+	if (stc2 < stc1) {
+		stc1 -= (1 << 31);
+		stc2 -= (1 << 31);
+		pts -= (1 << 31);
+	}
+
+	/* Cast the values or they may overflow at the multiplication step */
+	sof = static_cast<float>(
+		      (static_cast<unsigned long long>((sof2Device - sof1Device)) * static_cast<unsigned long long>(pts)
+			   + static_cast<unsigned long long>(sof1Device) * static_cast<unsigned long long>(stc2) 
+			   - static_cast<unsigned long long>(sof2Device) * static_cast<unsigned long long>(stc1))) /
+	      static_cast<float>((stc2 - stc1));
+
+	/*
+	 * Step 2: Similar to Step1, convert the calculated sof
+	 * to system timestamp from p1 and p2's host timestamp and usb sof pairs
+	 *
+	 * The equation is:
+	 * timestamp = ((ts2 - ts1) * sof + ts1 * sof2 - ts2 * sof1) / (sof2 - sof1)
+	 */
+	sof1Host = recoverHostSOF(p1.sofHost, p1.sofDevice) + 2048;
+	sof2Host = recoverHostSOF(p2.sofHost, p2.sofDevice) + 2048;
+
+	if (sof2Host < sof1Host) {
+		sof2Host += 2048;
+	}
+
+	/*
+	 * This accounts for the possibility that the calculated sof
+	 * rolled over and the host sof data fields did not.
+	 */
+	mean = (sof1Host + sof2Host) / 2;
+
+	if ((mean - 1024) > sof) {
+		sof += 2048;
+	} else if (sof > mean + 1024) {
+		sof -= 2048;
+	}
+
+	/* note: hostTS 1 has been set to zero so the difference is just the value of hostTS2.*/
+	unsigned long long result = static_cast<unsigned long long>(
+		(hostTS2 * sof + hostTS1 * sof2Host - hostTS2 * sof1Host) / (sof2Host - sof1Host));
+
+	/* Add the subtracted system timestamp from p1 back in */
+	return result + p1.tsHost;
 }
 
 /*
@@ -998,7 +1133,6 @@ UVCCameraData::MatchResult UVCCameraData::FindAndCompleteBuffer()
  */
 void UVCCameraData::bufferReady(FrameBuffer *buffer)
 {
-	/* \todo Use the UVC metadata to calculate a more precise timestamp */
 	if (!metadata_ || buffer->metadata().sequence < frameStart_) {
 		completeRequest(buffer, buffer->metadata().timestamp);
 		return;
