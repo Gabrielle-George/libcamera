@@ -53,7 +53,7 @@ public:
 	std::unique_ptr<V4L2VideoDevice> metadata_;
 	Stream stream_;
 	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
-	std::map<unsigned int, MappedFrameBuffer> mappedMetadataBuffers_;
+	std::vector<MappedFrameBuffer> mappedMetadataBuffers_;
 
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 
@@ -101,8 +101,8 @@ private:
 	int processControls(UVCCameraData *data, Request *request);
 
 	int createMetadataBuffers(Camera *camera, unsigned int count);
-	int cleanupMetadataBuffers(Camera *camera);
-	int cleanup(Camera *camera);
+	void releaseMetadataBuffers(Camera *camera);
+	void releaseBuffers(Camera *camera);
 
 	UVCCameraData *cameraData(Camera *camera)
 	{
@@ -236,9 +236,8 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 	return 0;
 }
 
-int PipelineHandlerUVC::cleanupMetadataBuffers(Camera *camera)
+void PipelineHandlerUVC::releaseMetadataBuffers(Camera *camera)
 {
-	int ret = 0;
 	UVCCameraData *data = cameraData(camera);
 
 	if (data->metadata_)
@@ -247,15 +246,18 @@ int PipelineHandlerUVC::cleanupMetadataBuffers(Camera *camera)
 	data->mappedMetadataBuffers_.clear();
 	data->metadata_ = nullptr;
 
-	return ret;
+	return;
 }
 
-int PipelineHandlerUVC::cleanup(Camera *camera)
+void PipelineHandlerUVC::releaseBuffers(Camera *camera)
 {
 	UVCCameraData *data = cameraData(camera);
-	cleanupMetadataBuffers(camera);
+
+	
+	releaseMetadataBuffers(camera);
+
 	data->video_->releaseBuffers();
-	return 0;
+	return;
 }
 
 /**
@@ -288,7 +290,7 @@ int PipelineHandlerUVC::createMetadataBuffers(Camera *camera, unsigned int count
 			return mappedBuffer.error();
 		}
 
-		data->mappedMetadataBuffers_.emplace(i, std::move(mappedBuffer));
+		data->mappedMetadataBuffers_.emplace_back(std::move(mappedBuffer));
 		data->metadataBuffers_[i]->setCookie(i);
 	}
 	return ret;
@@ -314,7 +316,7 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 
 	ret = data->video_->streamOn();
 	if (ret < 0) {
-		cleanup(camera);
+		releaseBuffers(camera);
 		return ret;
 	}
 
@@ -337,11 +339,12 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 			if (ret < 0) {
 				LOG(UVC, Warning)
 					<< "Metadata stream unavailable.  Using driver timestamps.";
-				cleanupMetadataBuffers(camera);
+				releaseMetadataBuffers(camera);
 				return 0;
 			}
 		}
 	}
+	
 	return 0;
 }
 
@@ -354,7 +357,7 @@ void PipelineHandlerUVC::stopDevice(Camera *camera)
 	if (data->metadata_)
 		data->metadata_->streamOff();
 
-	cleanup(camera);
+	releaseBuffers(camera);
 }
 
 int PipelineHandlerUVC::processControl(ControlList *controls, unsigned int id,
