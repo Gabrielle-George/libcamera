@@ -47,6 +47,8 @@ public:
 	void addControl(uint32_t cid, const ControlInfo &v4l2info,
 			ControlInfoMap::Map *ctrls);
 	void bufferReady(FrameBuffer *buffer);
+	void releaseMetadataBuffers();
+	void releaseBuffers();
 
 	const std::string &id() const { return id_; }
 
@@ -102,8 +104,6 @@ private:
 	int processControls(UVCCameraData *data, Request *request);
 
 	int createMetadataBuffers(Camera *camera, unsigned int count);
-	void releaseMetadataBuffers(Camera *camera);
-	void releaseBuffers(Camera *camera);
 
 	UVCCameraData *cameraData(Camera *camera)
 	{
@@ -237,27 +237,22 @@ int PipelineHandlerUVC::configure(Camera *camera, CameraConfiguration *config)
 	return 0;
 }
 
-void PipelineHandlerUVC::releaseMetadataBuffers(Camera *camera)
+void UVCCameraData::releaseMetadataBuffers()
 {
-	UVCCameraData *data = cameraData(camera);
-
-	if (data->metadata_)
-		data->metadata_->releaseBuffers();
-	data->metadataBuffers_.clear();
-	data->mappedMetaAddresses_.clear();
-	data->metadata_ = nullptr;
+	if (metadata_)
+		metadata_->releaseBuffers();
+	metadataBuffers_.clear();
+	mappedMetaAddresses_.clear();
+	metadata_ = nullptr;
 
 	return;
 }
 
-void PipelineHandlerUVC::releaseBuffers(Camera *camera)
-{
-	UVCCameraData *data = cameraData(camera);
+void UVCCameraData::releaseBuffers()
+{	
+	releaseMetadataBuffers();
 
-	
-	releaseMetadataBuffers(camera);
-
-	data->video_->releaseBuffers();
+	video_->releaseBuffers();
 	return;
 }
 
@@ -292,7 +287,7 @@ int PipelineHandlerUVC::createMetadataBuffers(Camera *camera, unsigned int count
 		if (address == MAP_FAILED) {
 			LOG(UVC, Error) << "Failed to mmap UVC metadata plane: -"
 					<< strerror(errno);
-			releaseMetadataBuffers(camera);
+			data->releaseMetadataBuffers();
 			return -ENOMEM;
 		}
 		uint8_t *uint_addr = reinterpret_cast<uint8_t*>(address);
@@ -328,7 +323,7 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 
 	ret = data->video_->streamOn();
 	if (ret < 0) {
-		releaseBuffers(camera);
+		data->releaseBuffers();
 		return ret;
 	}
 
@@ -351,7 +346,7 @@ int PipelineHandlerUVC::start(Camera *camera, [[maybe_unused]] const ControlList
 			if (ret < 0) {
 				LOG(UVC, Warning)
 					<< "Metadata stream unavailable.  Using driver timestamps.";
-				releaseMetadataBuffers(camera);
+				data->releaseMetadataBuffers();
 				return 0;
 			}
 		}
@@ -369,7 +364,7 @@ void PipelineHandlerUVC::stopDevice(Camera *camera)
 	if (data->metadata_)
 		data->metadata_->streamOff();
 
-	releaseBuffers(camera);
+	data->releaseBuffers();
 }
 
 int PipelineHandlerUVC::processControl(ControlList *controls, unsigned int id,
