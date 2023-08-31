@@ -76,15 +76,22 @@ public:
 		mappedMetaAddresses_;
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 	std::queue<FrameBuffer *> pendingVideoBuffers_;
-	std::queue<std::pair<unsigned int, uint64_t>> pendingMetadata_;
+	std::queue<std::tuple<unsigned int, unsigned long long>> pendingMetadata_;
 
 private:
+	typedef enum MatchResult { 
+		MatchFound,
+		MatchNotFound,
+		DropDetected
+	} MatchResult;
+
 	int initMetadata(MediaDevice *media);
 	void completeRequest(FrameBuffer *buffer, uint64_t timestamp);
 	void endCorruptedMetadataStream();
+	MatchResult FindAndCompleteBuffer();
 
 	const unsigned int frameStart_ = 1;
-	const unsigned int maxVidBuffersInQueue_ = 1;
+	const unsigned int maxVidBuffersInQueue_ = 3;
 
 	bool generateId();
 
@@ -915,6 +922,32 @@ void UVCCameraData::endCorruptedMetadataStream()
 }
 
 /*
+ * If the front of the metadata buffer and video buffer queues do not 
+ * have matching sequence numbers, sort through these queues to see
+ * if sequence numbers arrived out of order.  At the same time, if any 
+ * video buffers are unmatched with metadata, use the driver timestamp.
+ */
+UVCCameraData::MatchResult UVCCameraData::FindAndCompleteBuffer() 
+{
+	if (pendingMetadata_.empty() || pendingVideoBuffers_.empty()){
+		return MatchNotFound;
+	}
+
+	unsigned int mdSeq = std::get<0>(pendingMetadata_.front()) + frameStart_;
+	unsigned int vdSeq = pendingVideoBuffers_.front()->metadata().sequence;
+
+	if (mdSeq==vdSeq){
+		completeRequest(pendingVideoBuffers_.front(), std::get<1>(pendingMetadata_.front()));
+		pendingVideoBuffers_.pop();
+		pendingMetadata_.pop();
+		return MatchFound;
+	}
+	//\todo: handle if they don't match up: search for the correct one!
+
+	return MatchNotFound;
+}
+
+/*
  * If there is a metadata buffer that hasn't been matched with a
  * video buffer, check to see if it matches this video buffer.
  *
@@ -942,34 +975,24 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 		return;
 	}
 
-	if (!pendingMetadata_.empty()) {
-		/* A metadata buffer was ready first. */
-		unsigned int mdSequence = std::get<0>(pendingMetadata_.front()) + frameStart_;
-		if (mdSequence == buffer->metadata().sequence) {
-			completeRequest(buffer, std::get<1>(pendingMetadata_.front()));
-			pendingMetadata_.pop();
-			return;
-		} else {
-			/* \todo: Is there a reason metadata buffers can arrive out of order? */
-			endCorruptedMetadataStream();
-			return;
-		}
-	}
-
 	pendingVideoBuffers_.push(buffer);
+
+	FindAndCompleteBuffer();
+
 	/*
 	 * Deal with video buffers that haven't been completed, and with
 	 * buffers whose metadata information arrived out of order.
 	 */
-	if (pendingVideoBuffers_.size() > maxVidBuffersInQueue_) {
+	if (pendingVideoBuffers_.size() > maxVidBuffersInQueue_ 
+		&& (buffer->metadata().status != FrameMetadata::Status::FrameCancelled)) {
 		endCorruptedMetadataStream();
 	}
 }
 
 void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 {
-	if (!metadata_ ||
-	    buffer->metadata().status != FrameMetadata::Status::FrameSuccess) {
+	if (!metadata_ || 
+			buffer->metadata().status != FrameMetadata::Status::FrameSuccess) {
 		return;
 	}
 
@@ -980,43 +1003,25 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	 *
 	 * \todo: Is there a better way to do this?  What is the root cause?
 	 */
-	unsigned int mdSequence = buffer->metadata().sequence + frameStart_;
 	int pos = buffer->cookie();
 
 	Span<uint8_t> planeData(mappedMetaAddresses_[pos].get(),
 				sizeof(uvc_meta_buf) + sizeof(UVCTimingBuf));
-	uvc_meta_buf *metaBuf = reinterpret_cast<uvc_meta_buf *>(planeData.data());
-	UVCTimingBuf *timeBuf = reinterpret_cast<UVCTimingBuf *>(&planeData.data()[sizeof(uvc_meta_buf)]);
-
-	size_t UVCPayloadHeaderSize = sizeof(metaBuf->length) +
-				      sizeof(metaBuf->flags) + sizeof(UVCTimingBuf);
-	if (metaBuf->length < UVCPayloadHeaderSize) {
+	uvc_meta_buf *metaBufPlane = reinterpret_cast<uvc_meta_buf *>(planeData.data());
+	
+	size_t UVCPayloadHeaderSize = sizeof(metaBufPlane->length) +
+				      sizeof(metaBufPlane->flags) + sizeof(UVCTimingBuf);
+	if (metaBufPlane->length < UVCPayloadHeaderSize) {
 		endCorruptedMetadataStream();
 		return;
 	}
 
-	/*
-	 * Match a pending video buffer with this buffer's sequence.  If
-	 * there is none available, put this timestamp information on the
-	 * queue. When the matching video buffer does come in, it will use
-	 * a timestamp from this metadata.
-	 */
-	if (!pendingVideoBuffers_.empty()) {
-		FrameBuffer *vidBuffer = pendingVideoBuffers_.front();
-		unsigned int vidSequence = vidBuffer->metadata().sequence;
+	unsigned long long ns = metaBufPlane->ns;
+	pendingMetadata_.push(
+			std::make_tuple(buffer->metadata().sequence, ns));
 
-		if (vidSequence == mdSequence) {
-			completeRequest(vidBuffer, static_cast<uint64_t>(metaBuf->ns));
-			pendingVideoBuffers_.pop();
-		} else {
-			endCorruptedMetadataStream();
-			return;
-		}
-	} else {
-		pendingMetadata_.push(
-			std::make_pair(buffer->metadata().sequence,
-				       static_cast<uint64_t>(metaBuf->ns)));
-	}
+	FindAndCompleteBuffer();
+
 	metadata_->queueBuffer(buffer);
 }
 
