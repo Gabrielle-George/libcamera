@@ -41,7 +41,7 @@ LOG_DEFINE_CATEGORY(UVC)
  * The UVCH buffer contains an unsigned char array encoding UVC
  * timing data that needs to be recast into usable data. The contents
  * of that array are specified in the UVC specifications manual, and
- * are copied here exactly as they are specified.  
+ * are copied here exactly as they are specified.
  */
 struct UVCTimingBuf {
 	unsigned int pts; /* Presentation TimeStamp, in device clock time*/
@@ -984,8 +984,8 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	unsigned int mdSequence = buffer->metadata().sequence + frameStart_;
 	int pos = buffer->cookie();
 
-	Span<uint8_t> planeData(mappedMetaAddresses_[pos].get(), 
-							sizeof(uvc_meta_buf) + sizeof(UVCTimingBuf));
+	Span<uint8_t> planeData(mappedMetaAddresses_[pos].get(),
+				sizeof(uvc_meta_buf) + sizeof(UVCTimingBuf));
 	uvc_meta_buf *metaBuf = reinterpret_cast<uvc_meta_buf *>(planeData.data());
 	UVCTimingBuf *timeBuf = reinterpret_cast<UVCTimingBuf *>(&planeData.data()[sizeof(uvc_meta_buf)]);
 
