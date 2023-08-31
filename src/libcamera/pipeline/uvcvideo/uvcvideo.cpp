@@ -985,11 +985,10 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	unsigned int mdSequence = buffer->metadata().sequence + frameStart_;
 	int pos = buffer->cookie();
 
-	Span<uint8_t> memMeta = mappedMetadataBuffers_.at(pos).planes()[0];
-	uvc_meta_buf *metaBuf = reinterpret_cast<uvc_meta_buf *>(memMeta.data());
-
-	//Span<uint8_t> memTime = mappedMetadataBuffers_.at(pos).planes()[0];
-	//UVCTimingBuf * timeBuf = reinterpret_cast<UVCTimingBuf *>(&memTime.data()[sizeof(uvc_meta_buf)]);
+	Span<uint8_t> planeData(mappedMetaAddresses_[pos].get(), 
+							sizeof(uvc_meta_buf) + sizeof(UVCTimingBuf));
+	uvc_meta_buf *metaBuf = reinterpret_cast<uvc_meta_buf *>(planeData.data());
+	UVCTimingBuf *timeBuf = reinterpret_cast<UVCTimingBuf *>(&planeData.data()[sizeof(uvc_meta_buf)]);
 
 	size_t UVCPayloadHeaderSize = sizeof(metaBuf->length) +
 				      sizeof(metaBuf->flags) + sizeof(UVCTimingBuf);
