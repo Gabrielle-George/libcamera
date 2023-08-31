@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <math.h>
 #include <memory>
+#include <sys/mman.h>
 #include <tuple>
 
 #include <libcamera/base/log.h>
@@ -53,8 +54,8 @@ public:
 	std::unique_ptr<V4L2VideoDevice> metadata_;
 	Stream stream_;
 	std::vector<std::unique_ptr<FrameBuffer>> metadataBuffers_;
-	std::vector<MappedFrameBuffer> mappedMetadataBuffers_;
-
+	std::vector<std::unique_ptr<uint8_t, void (*)(uint8_t *)>>
+		mappedMetaAddresses_;
 	std::map<PixelFormat, std::vector<SizeRange>> formats_;
 
 private:
@@ -243,7 +244,7 @@ void PipelineHandlerUVC::releaseMetadataBuffers(Camera *camera)
 	if (data->metadata_)
 		data->metadata_->releaseBuffers();
 	data->metadataBuffers_.clear();
-	data->mappedMetadataBuffers_.clear();
+	data->mappedMetaAddresses_.clear();
 	data->metadata_ = nullptr;
 
 	return;
@@ -281,16 +282,27 @@ int PipelineHandlerUVC::createMetadataBuffers(Camera *camera, unsigned int count
 		return -EINVAL;
 
 	for (unsigned int i = 0; i < count; i++) {
-		MappedFrameBuffer mappedBuffer(data->metadataBuffers_[i].get(),
-					       MappedFrameBuffer::MapFlag::Read, true);
-		if (!mappedBuffer.isValid()) {
-			LOG(UVC, Warning)
-				<< "Failed to mmap metadata buffer: "
-				<< strerror(mappedBuffer.error());
-			return mappedBuffer.error();
-		}
+		std::unique_ptr<FrameBuffer> &buffer = data->metadataBuffers_[i];
+		unsigned int bufferPlaneLength = buffer->planes()[0].length;
+		void *address = mmap(NULL, bufferPlaneLength,
+				     PROT_READ | PROT_WRITE,
+				     MAP_SHARED,
+				     buffer->planes()[0].fd.get(), buffer->planes()[0].offset);
 
-		data->mappedMetadataBuffers_.emplace_back(std::move(mappedBuffer));
+		if (address == MAP_FAILED) {
+			LOG(UVC, Error) << "Failed to mmap UVC metadata plane: -"
+					<< strerror(errno);
+			releaseMetadataBuffers(camera);
+			return -ENOMEM;
+		}
+		uint8_t *uint_addr = reinterpret_cast<uint8_t*>(address);
+
+		data->mappedMetaAddresses_.emplace_back(
+			uint_addr, [](uint8_t *p) {
+                       munmap(p,sizeof(uvc_meta_buf)+ sizeof(UVCTimingBuf));
+		        });
+
+		buffer->setCookie(i);		
 		data->metadataBuffers_[i]->setCookie(i);
 	}
 	return ret;
