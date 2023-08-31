@@ -81,7 +81,7 @@ public:
 private:
 	int initMetadata(MediaDevice *media);
 	void completeRequest(FrameBuffer *buffer, uint64_t timestamp);
-	void endCorruptedStream();
+	void endCorruptedMetadataStream();
 
 	const unsigned int frameStart_ = 1;
 	const unsigned int maxVidBuffersInQueue_ = 1;
@@ -895,24 +895,23 @@ void UVCCameraData::handleUnfinishedRequests()
 {
 	while (!pendingVideoBuffers_.empty()) {
 		FrameBuffer *oldBuffer = pendingVideoBuffers_.front();
-		Request *oldRequest = oldBuffer->request();
 
-		oldRequest->metadata().set(controls::SensorTimestamp,
-					   oldBuffer->metadata().timestamp);
-
-		pipe()->completeBuffer(oldRequest, oldBuffer);
-		pipe()->completeRequest(oldRequest);
+		completeRequest(oldBuffer, oldBuffer->metadata().timestamp);
 		pendingVideoBuffers_.pop();
 	}
 }
 
-void UVCCameraData::endCorruptedStream()
-{
-	handleUnfinishedRequests();
-	/* Close the metadata node so we don't get inaccurate timestamps*/
-	metadata_ = nullptr;
-	LOG(UVC, Error)
+/* Close the metadata node so we don't get inaccurate timestamps*/
+void UVCCameraData::endCorruptedMetadataStream()
+{	LOG(UVC, Error)
 		<< "UVC metadata stream corrupted. Reverting to driver timestamps.";
+	metadata_->streamOff();
+
+	releaseMetadataBuffers();
+	
+	metadata_ = nullptr;
+	
+	handleUnfinishedRequests();
 }
 
 /*
@@ -952,7 +951,7 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 			return;
 		} else {
 			/* \todo: Is there a reason metadata buffers can arrive out of order? */
-			endCorruptedStream();
+			endCorruptedMetadataStream();
 			return;
 		}
 	}
@@ -963,7 +962,7 @@ void UVCCameraData::bufferReady(FrameBuffer *buffer)
 	 * buffers whose metadata information arrived out of order.
 	 */
 	if (pendingVideoBuffers_.size() > maxVidBuffersInQueue_) {
-		endCorruptedStream();
+		endCorruptedMetadataStream();
 	}
 }
 
@@ -992,7 +991,7 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 	size_t UVCPayloadHeaderSize = sizeof(metaBuf->length) +
 				      sizeof(metaBuf->flags) + sizeof(UVCTimingBuf);
 	if (metaBuf->length < UVCPayloadHeaderSize) {
-		endCorruptedStream();
+		endCorruptedMetadataStream();
 		return;
 	}
 
@@ -1010,7 +1009,8 @@ void UVCCameraData::bufferReadyMetadata(FrameBuffer *buffer)
 			completeRequest(vidBuffer, static_cast<uint64_t>(metaBuf->ns));
 			pendingVideoBuffers_.pop();
 		} else {
-			endCorruptedStream();
+			endCorruptedMetadataStream();
+			return;
 		}
 	} else {
 		pendingMetadata_.push(
