@@ -416,34 +416,41 @@ bool PipelineHandlerUVC::match(DeviceEnumerator *enumerator)
 
 int UVCCameraData::initMetadata(MediaDevice *media)
 {
-	int ret;
-
 	const std::vector<MediaEntity *> &entities = media->entities();
-	std::string dev_node_name = video_->deviceNode();
+
+	/*
+	 * \todo The kernel doesn't expose the relationship between image
+	 * capture video devices and metadata capture video devices. Until this
+	 * gets fixed on the kernel side, do our best by picking one metadata
+	 * capture video device.
+	 */
 	auto metadata = std::find_if(entities.begin(), entities.end(),
-				     [&dev_node_name](MediaEntity *e) {
+				     [](MediaEntity *e) {
 					     return e->type() == MediaEntity::Type::V4L2VideoDevice
-							&& !(e->flags() & MEDIA_ENT_FL_DEFAULT);
+                                                       && (e->pads().size() == 0);
 				     });
 
-	if (metadata == entities.end()) {
+	if (metadata == entities.end()){
+		metadata_ = nullptr;
 		return -ENODEV;
 	}
 
 	/* configure the metadata node */
 	metadata_ = std::make_unique<V4L2VideoDevice>(*metadata);
-	if (!metadata_)
-		return -ENOMEM;
-	ret = metadata_->open();
-	if (ret)
-		return ret;
 
-	if (!(metadata_->caps().isMeta())) {
+	int ret = metadata_->open();
+	if (ret) {
+		metadata_ = nullptr;
+		return ret;
+	}
+
+	if (!metadata_->caps().isMeta()) {
 		/*
 		 * UVC Devices are usually only anticipated to expose two
-         * devices, so we assume the non-default device is the metadata
-         * device node
+		 * devices, so we assume the non-default device is the metadata
+		 * device node
 		 */
+		metadata_ = nullptr;
 		return -EINVAL;
 	}
 	return 0;
@@ -551,10 +558,8 @@ int UVCCameraData::init(MediaDevice *media)
 	controlInfo_ = ControlInfoMap(std::move(ctrls), controls::controls);
 
 	ret = initMetadata(media);
-	if (ret) {
-		metadata_ = nullptr;
+	if (ret)
 		LOG(UVC, Error) << "Could not find a metadata video device.";
-	}
 
 	return 0;
 }
